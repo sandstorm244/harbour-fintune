@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+X-Nemo-Application-Type=silica-qt5
+Icon=harbour-fintune
+Name=FinTune
+Exec=harbour-fintune
+# No MimeType URL handler: FinTube owns youtube.com links; FinTune is launched directly.
+
+# Sandboxing is disabled deliberately. A YouTube client needs an in-process loopback HTTP
+# proxy (GStreamer <-> Python, on 127.0.0.1) for header injection + range handling, plus an
+# external yt-dlp subprocess; Sailjail's network confinement refuses the loopback connection
+# ("Connection Refused" on playback). MicroTube ships the same way for the same reason. This
+# is fine for our channel — FinTune is distributed via Chum/OpenRepos, not Jolla Harbour
+# (Harbour is the only store that requires sandboxing).
+[X-Sailjail]
+Sandboxing=Disabled
