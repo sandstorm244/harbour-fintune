@@ -20,7 +20,13 @@ Item {
     property bool ffmpegInstalling: false
     property real ffmpegPct: -1
     property string ffmpegStatusMsg: ""
+    property bool denoInstalling: false  // downloading Deno (the PO provider's runtime) into bin/
+    property real denoPct: -1
+    property string denoStatusMsg: ""
     property string playerClient: ""     // yt-dlp youtube player_client ("" = auto)
+    property string ytdlpChannel: "stable" // yt-dlp update channel: "stable" | "nightly"
+    property string innertubeVersion: ""   // live WEB_REMIX client version (self-healing identity)
+    property bool innertubeLive: false     // true once auto-detected from the site (else default)
     property string poToken: ""          // manual PO token (advanced)
     property string visitorData: ""      // manual visitor_data (advanced)
     property bool homeBackdrop: true     // blurred now-playing art behind the home carousels
@@ -223,6 +229,7 @@ Item {
         py.call("youfish.get_settings", [], function(s) {
             if (!s) return
             backend.playerClient = s.player_client || ""
+            backend.ytdlpChannel = s.ytdlp_channel || "stable"
             backend.poToken = s.po_token || ""
             backend.visitorData = s.visitor_data || ""
             backend.homeBackdrop = (s.home_backdrop === undefined) ? true : !!s.home_backdrop
@@ -281,6 +288,7 @@ Item {
         py.call("youfish.set_setting", [key, value], function(s) {
             if (!s) return
             backend.playerClient = s.player_client || ""
+            backend.ytdlpChannel = s.ytdlp_channel || "stable"
             backend.poToken = s.po_token || ""
             backend.visitorData = s.visitor_data || ""
         })
@@ -345,6 +353,15 @@ Item {
         backend.ffmpegStatusMsg = ""
         py.call("youfish.install_ffmpeg", [], function() {})
     }
+    // Download Deno (the PO provider's runtime) into our own bin/ — so the provider needs no
+    // manual runtime install. ~40 MB one-time fetch; progress/result arrive as pyotherside events.
+    function installDeno() {
+        if (backend.denoInstalling) return
+        backend.denoInstalling = true
+        backend.denoPct = 0
+        backend.denoStatusMsg = ""
+        py.call("youfish.install_deno", [], function() {})
+    }
 
     // --- PO-token provider (bgutil): opt-in setup + on/off, all driven from Python ---
     function loadPotStatus() {
@@ -380,6 +397,16 @@ Item {
         })
     }
 
+    // Live InnerTube client identity (self-healing) — surfaced in Settings so the auto-detect is
+    // verifiable. Reading it also nudges a background refresh when the cached version is stale.
+    function loadInnertubeIdentity() {
+        py.call("ytm.innertube_identity", [], function(r) {
+            if (!r) return
+            backend.innertubeVersion = r.version || ""
+            backend.innertubeLive = (r.source === "live")
+        })
+    }
+
     Python {
         id: py
         Component.onCompleted: {
@@ -398,6 +425,7 @@ Item {
                 backend.ytmReady = true
                 backend.ytmAccountStatus()
                 backend.loadDisliked()
+                backend.loadInnertubeIdentity()
             })
         }
         // Background-download progress/completion events from the Python thread.
@@ -429,6 +457,14 @@ Item {
                     backend.ffmpegVersion = data[3]
                     backend.ffmpegReady = true
                 }
+            }
+            else if (data[0] === "deno_install_progress")
+                backend.denoPct = data[1]
+            else if (data[0] === "deno_install_done") {
+                backend.denoInstalling = false
+                backend.denoPct = -1
+                backend.denoStatusMsg = data[2]
+                backend.loadPotStatus()   // refresh potDeno — the provider setup unlocks once found
             }
             else if (data[0] === "pot_install_progress")
                 backend.potStatusMsg = data[1]

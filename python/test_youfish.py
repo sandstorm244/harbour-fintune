@@ -5,7 +5,7 @@ Runs with NO device, network, yt-dlp, or PO-token server — resolve()'s externa
 so this exercises the pure format-selection + resolve wiring in isolation. Run:  python3 test_youfish.py
 
 These exist because this layer kept regressing: the `by_itag` NameError that crashed EVERY music
-resolve, and the dub-instead-of-source audio pick. Both are covered below so they can't
+resolve (R49), and the dub-instead-of-source audio pick (R52). Both are covered below so they can't
 come back silently. youfish.py imports `pyotherside` only inside functions, so `import youfish` is safe
 here.
 """
@@ -242,6 +242,40 @@ class YtmIdentity(unittest.TestCase):
     def test_scrape_rejects_bogus_version(self):
         _key, ver = self._scrape('<script>{"INNERTUBE_CLIENT_VERSION":"garbage"}</script>')
         self.assertIsNone(ver)   # the sanity check drops a value that isn't a 1.YYYYMMDD.xx.xx
+
+
+class NoPathFallback(unittest.TestCase):
+    """Managed-only resolution: with no app-managed binary (and FinTube's reuse copies absent),
+    _ytdlp_path/_ffmpeg_path return None and NEVER consult PATH — locks in the 'we only run copies
+    we installed' invariant so it can't quietly regress to picking up a system yt-dlp/ffmpeg."""
+    def setUp(self):
+        self._mo, self._mf, self._which = (youfish._managed_ytdlp, youfish._managed_ffmpeg,
+                                           youfish.shutil.which)
+        self._cands, self._ftdir = youfish._CANDIDATE_PATHS, youfish._FINTUBE_DATA_DIR
+        youfish._managed_ytdlp = lambda: "/nonexistent/yt-dlp"
+        youfish._managed_ffmpeg = lambda: "/nonexistent/ffmpeg"
+        youfish._CANDIDATE_PATHS = ()                        # no FinTube-reuse yt-dlp
+        youfish._FINTUBE_DATA_DIR = "/nonexistent-fintube"   # no FinTube-reuse ffmpeg
+        self.which_calls = []
+
+        def _spy(name):
+            self.which_calls.append(name)
+            return "/usr/bin/" + name   # a decoy on PATH that MUST be ignored
+
+        youfish.shutil.which = _spy
+
+    def tearDown(self):
+        youfish._managed_ytdlp, youfish._managed_ffmpeg, youfish.shutil.which = (
+            self._mo, self._mf, self._which)
+        youfish._CANDIDATE_PATHS, youfish._FINTUBE_DATA_DIR = self._cands, self._ftdir
+
+    def test_ytdlp_managed_only(self):
+        self.assertIsNone(youfish._ytdlp_path())
+        self.assertNotIn("yt-dlp", self.which_calls)   # PATH never consulted
+
+    def test_ffmpeg_managed_only(self):
+        self.assertIsNone(youfish._ffmpeg_path())
+        self.assertNotIn("ffmpeg", self.which_calls)
 
 
 class PotTag(unittest.TestCase):

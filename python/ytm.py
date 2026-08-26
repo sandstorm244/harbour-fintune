@@ -11,11 +11,10 @@ Design choices (see PLAN.md):
   * Logged-out is a first-class state: search + generic browse work with no auth.
     Auth (OAuth device flow) unlocks the *personalized* home + library.
 
-VALIDATE-ON-DEVICE: the OAuth section uses the public "YouTube on TV" limited-input
-client — the same creds yt-dlp's oauth and MicroTube's login use. Google has
-tightened this before; if device login stops working, this is the first suspect
-(see PLAN.md "Auth model" for fallbacks). The unauth search/browse path does not
-depend on any of it.
+Auth note: the OAuth section uses the public "YouTube on TV" limited-input client — the
+same credentials yt-dlp's oauth uses. Google has tightened this before; if device login
+stops working, it is the first suspect (see PLAN.md "Auth model" for fallbacks). The
+unauthenticated search/browse path does not depend on any of it.
 """
 
 import gzip
@@ -92,7 +91,7 @@ def _cookies_path():
 
 
 # --------------------------------------------------------------------------- #
-# IPv4 pin (this device's IPv6 path is a black hole — see youfish._force_ipv4)
+# IPv4 pin (avoid stalled connects on unroutable-IPv6 networks — see youfish._force_ipv4)
 # --------------------------------------------------------------------------- #
 
 _ipv4_forced = False
@@ -250,6 +249,15 @@ def _warm_ytm_config():
             _ytm_cfg_warming = False
 
     threading.Thread(target=_bg, daemon=True).start()
+
+
+def innertube_identity():
+    """The InnerTube client identity currently in use, for Settings/diagnostics. `source` is
+    'live' once the version + key have been auto-detected from the site, 'default' while still on
+    the shipped fallback. Reading it also nudges a background refresh when the cache is stale."""
+    cfg = _ytm_config()
+    return {"version": cfg.get("version", ""),
+            "source": "live" if cfg.get("ts", 0) else "default"}
 
 
 def _context(auth=False):
