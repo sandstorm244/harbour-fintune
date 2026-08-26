@@ -6,8 +6,7 @@ sibling video client, **FinTube**.
 
 FinTune browses YouTube Music (search, charts, and — signed in — your personalized
 home and library) and plays tracks through the device's native media stack, using a
-**user-managed `yt-dlp` binary** to resolve streams. See [PLAN.md](PLAN.md) for the
-original design notes.
+**user-managed `yt-dlp` binary** to resolve streams.
 
 ## Features
 
@@ -47,20 +46,16 @@ the other. Music-specific logic lives in `ytm.py` and the QML.
 
 ## Prerequisites (on the device)
 
-**The app installs its third-party helpers for you** — `yt-dlp` and `ffmpeg` on first
-use, and `Deno` on request (for the PO-token provider) — each downloaded into its own
-data dir on your confirmation. No packages to hunt down, no RPM dependencies to satisfy.
+**Nothing to install by hand.** The app fetches every helper below itself — it just
+asks you to confirm each download, then installs it into its own data dir. There are
+no packages to hunt down and no RPM dependencies to satisfy first.
 
-- **`yt-dlp`** *(app-installed)* — not bundled; downloaded/updated into the app's own
-  data dir (or reused from FinTube if present) — the only copy it uses; a system/PATH one
-  is ignored. Keep it current — extraction breaks often.
-- **ffmpeg** *(app-installed · optional)* — only for downloads; one tap fetches a static
-  build.
-- **Deno 2.x** *(app-installed · optional)* — required only for the **PO-token provider**,
-  which unlocks full-quality streams. Tap *Download Deno* in Settings (a ~40 MB one-time
-  fetch of Deno's standalone binary) — or point the app at one you've installed yourself
-  (`pkcon install deno`, Chum, or `~/.local/bin`; all auto-detected). Then *Set up
-  provider* does the rest. Without it, many streams 403 or drop to low quality.
+- **`yt-dlp`** — not bundled; the app checks at launch and, on your confirmation,
+  installs/updates it into its own data dir (or reuses FinTube's binary if it's
+  already there). Keep it current — extraction breaks often.
+- **Deno 2.x** *(optional)* — for the PO-token provider (its own per-app,
+  confirm-to-install step in Settings; without a token many streams 403).
+- **ffmpeg** *(optional)* — for downloads; fetched on confirmation.
 
 ## Staying current (no app rebuilds)
 
@@ -110,4 +105,8 @@ python3 python/test_youfish.py
 
 ## License
 
-GPLv3.
+GNU Public License Version 3
+
+## Notice
+
+This appplication has been vibecoded, if you dont like that feel free to not install the application.
