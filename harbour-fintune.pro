@@ -46,6 +46,7 @@ DISTFILES += \
     qml/pages/QueuePage.qml \
     qml/pages/DownloadsPage.qml \
     qml/pages/MorePage.qml \
+    qml/pages/ProvidersPage.qml \
     qml/pages/LyricsPage.qml \
     qml/pages/EqualizerPage.qml \
     qml/pages/PlaylistPickerPage.qml \

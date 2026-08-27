@@ -59,7 +59,8 @@ Page {
                     { title: "Library", desc: "Playlists + Liked Music", page: "LibraryPage.qml" },
                     { title: "Downloads", desc: "Offline tracks", page: "DownloadsPage.qml" },
                     { title: "History", desc: "Recently played", page: "HistoryPage.qml" },
-                    { title: "Settings", desc: "Account, audio, EQ, provider", page: "SettingsPage.qml" }
+                    { title: "Settings", desc: "Account, appearance, playback", page: "SettingsPage.qml" },
+                    { title: "Providers", desc: "yt-dlp, ffmpeg, PO-token provider", page: "ProvidersPage.qml" }
                 ]
             })
         }

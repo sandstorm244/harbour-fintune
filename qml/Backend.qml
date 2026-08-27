@@ -27,8 +27,6 @@ Item {
     property string ytdlpChannel: "stable" // yt-dlp update channel: "stable" | "nightly"
     property string innertubeVersion: ""   // live WEB_REMIX client version (self-healing identity)
     property bool innertubeLive: false     // true once auto-detected from the site (else default)
-    property string poToken: ""          // manual PO token (advanced)
-    property string visitorData: ""      // manual visitor_data (advanced)
     property bool homeBackdrop: true     // blurred now-playing art behind the home carousels
     property bool eqEnabled: false       // 10-band equalizer on/off
     property var  eqBands: [0,0,0,0,0,0,0,0,0,0]  // per-band gain (dB), applied by the C++ player
@@ -230,8 +228,6 @@ Item {
             if (!s) return
             backend.playerClient = s.player_client || ""
             backend.ytdlpChannel = s.ytdlp_channel || "stable"
-            backend.poToken = s.po_token || ""
-            backend.visitorData = s.visitor_data || ""
             backend.homeBackdrop = (s.home_backdrop === undefined) ? true : !!s.home_backdrop
             backend.eqEnabled = !!s.eq_enabled
             if (s.eq_bands && s.eq_bands.length === 10)
@@ -282,15 +278,12 @@ Item {
         })
     }
 
-    // Generic string setting (player_client / po_token / visitor_data). Mirrors the
-    // saved value back onto the matching property.
+    // Generic string setting (player_client). Mirrors the saved value back onto the property.
     function setSetting(key, value) {
         py.call("youfish.set_setting", [key, value], function(s) {
             if (!s) return
             backend.playerClient = s.player_client || ""
             backend.ytdlpChannel = s.ytdlp_channel || "stable"
-            backend.poToken = s.po_token || ""
-            backend.visitorData = s.visitor_data || ""
         })
     }
 
