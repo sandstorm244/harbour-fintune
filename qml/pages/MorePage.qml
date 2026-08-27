@@ -5,7 +5,9 @@ import Sailfish.Silica 1.0
 // Reached with a forward (right-to-left) swipe from Home; the back swipe returns to Home. The
 // home attaches it via pageStack.pushAttached("MorePage.qml", { entries: [...] }).
 //
-// Each entry: { title, desc (optional subtitle), page (qml file to push), icon (optional) }.
+// Each entry: { title, desc (optional subtitle), page (qml file to push), icon (optional),
+//   handler (optional) }. Normally a row pushes `page`; if it instead carries a `handler` function
+// (an ACTION row, e.g. "Import subscriptions"), that runs on tap and no page is pushed.
 // `icon` accepts a theme name ("icon-m-foo" -> image://theme/…, auto-tinted) OR any image URL
 // (e.g. "../icons/library.png") — drop a custom glyph in whenever you make one; leave it out and
 // the row is clean type only.
@@ -25,7 +27,10 @@ Page {
             id: row
             width: ListView.view.width
             height: Theme.itemSizeLarge
-            onClicked: pageStack.push(Qt.resolvedUrl(modelData.page))
+            onClicked: {
+                if (modelData.handler) modelData.handler()   // action row (e.g. Import) — no page
+                else pageStack.push(Qt.resolvedUrl(modelData.page))
+            }
 
             Row {
                 x: Theme.horizontalPageMargin
