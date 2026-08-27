@@ -1,7 +1,7 @@
 Name:       harbour-fintune
 Summary:    A YouTube Music client for Sailfish OS
-Version:    1.0.0
-Release:    2
+Version:    1.1.0
+Release:    1
 License:    GPLv3
 URL:        https://github.com/sandstorm244/harbour-fintune
 Source0:    %{name}-%{version}.tar.bz2

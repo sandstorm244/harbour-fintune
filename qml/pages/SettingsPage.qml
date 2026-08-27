@@ -1,11 +1,14 @@
 import QtQuick 2.0
 import Sailfish.Silica 1.0
+import Sailfish.Pickers 1.0
 
 // App settings — account, appearance and playback. Third-party tool management (yt-dlp, ffmpeg,
 // PO-token provider) lives on its own Providers page, reached from Home → More → Providers.
 Page {
     id: page
     allowedOrientations: Orientation.All
+
+    property string dlError: ""   // last download-folder error (e.g. not writable), shown inline
 
     SilicaFlickable {
         anchors.fill: parent
@@ -119,6 +122,48 @@ Page {
                 automaticCheck: false
                 checked: app.backend.skipDisliked
                 onClicked: app.backend.setSkipDisliked(!app.backend.skipDisliked)
+            }
+
+            SectionHeader { text: "Downloads" }
+
+            ValueButton {
+                label: "Folder"
+                value: app.backend.downloadDir ? app.backend.downloadDir : "App folder (default)"
+                onClicked: pageStack.animatorPush(folderPickerPage)
+            }
+
+            Label {
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * Theme.horizontalPageMargin
+                wrapMode: Text.Wrap
+                text: page.dlError.length > 0
+                      ? page.dlError
+                      : (app.backend.downloadDir
+                         ? "Tracks are saved here. Tap Folder to change it."
+                         : "Tracks are saved in the app's own private folder by default — pick a "
+                           + "folder like Music or an SD card to find them in the file manager.")
+                color: page.dlError.length > 0 ? Theme.errorColor : Theme.secondaryColor
+                font.pixelSize: Theme.fontSizeExtraSmall
+            }
+
+            Button {
+                visible: app.backend.downloadDir.length > 0
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: "Reset to app folder"
+                onClicked: app.backend.setDownloadDir("", function(r) { page.dlError = "" })
+            }
+        }
+    }
+
+    // Folder picker for the download location. FinTune runs unsandboxed, so it can browse and
+    // write anywhere in the home tree; Python validates the pick is writable before saving.
+    Component {
+        id: folderPickerPage
+        FolderPickerPage {
+            onSelectedPathChanged: {
+                app.backend.setDownloadDir(selectedPath, function(r) {
+                    page.dlError = (r && r.ok === false) ? (r.error || "Couldn't use that folder.") : ""
+                })
             }
         }
     }
