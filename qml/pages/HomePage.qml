@@ -46,6 +46,24 @@ Page {
     }
 
     Component.onCompleted: if (app.backend.ytmReady) page.loadHome()
+
+    // Attach the "More" launcher as a forward (right-to-left swipe) sibling of Home, so the
+    // secondary destinations no longer crowd the pull-down. The back swipe returns here.
+    property bool _moreAttached: false
+    onStatusChanged: {
+        if (status === PageStatus.Active && !_moreAttached) {
+            _moreAttached = true
+            pageStack.pushAttached(Qt.resolvedUrl("MorePage.qml"), {
+                heading: "More",
+                entries: [
+                    { title: "Library", desc: "Playlists + Liked Music", page: "LibraryPage.qml" },
+                    { title: "Downloads", desc: "Offline tracks", page: "DownloadsPage.qml" },
+                    { title: "History", desc: "Recently played", page: "HistoryPage.qml" },
+                    { title: "Settings", desc: "Account, audio, EQ, provider", page: "SettingsPage.qml" }
+                ]
+            })
+        }
+    }
     // Cold start: the Python modules may still be importing when the page appears.
     Connections {
         target: app.backend.ytmReady ? null : app.backend
@@ -86,22 +104,6 @@ Page {
         contentHeight: col.height + (app.npActive ? Theme.itemSizeMedium : 0) + Theme.paddingLarge
 
         PullDownMenu {
-            MenuItem {
-                text: "Settings"
-                onClicked: pageStack.push(Qt.resolvedUrl("SettingsPage.qml"))
-            }
-            MenuItem {
-                text: "Library"
-                onClicked: pageStack.push(Qt.resolvedUrl("LibraryPage.qml"))
-            }
-            MenuItem {
-                text: "Downloads"
-                onClicked: pageStack.push(Qt.resolvedUrl("DownloadsPage.qml"))
-            }
-            MenuItem {
-                text: "History"
-                onClicked: pageStack.push(Qt.resolvedUrl("HistoryPage.qml"))
-            }
             MenuItem {
                 text: "Search"
                 onClicked: pageStack.push(Qt.resolvedUrl("SearchPage.qml"))
