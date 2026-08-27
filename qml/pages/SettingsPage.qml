@@ -28,13 +28,21 @@ Page {
                 x: Theme.horizontalPageMargin
                 width: parent.width - 2 * Theme.horizontalPageMargin
                 wrapMode: Text.Wrap
-                text: app.backend.ytmLoggedIn
-                      ? "Signed in — your personalized home, playlists and liked songs are available."
-                      : "Browsing and playback work signed out. For your recommendations and "
-                        + "playlists: sign in to music.youtube.com in the Sailfish browser, then "
-                        + "tap Import from browser below. (Google blocks sign-in inside apps, so we "
-                        + "read the session from your real browser — nothing to copy.)"
-                color: app.backend.ytmLoggedIn ? Theme.secondaryHighlightColor : Theme.secondaryColor
+                text: app.backend.ytmSessionState === "expired"
+                      ? "Your sign-in expired — Google no longer accepts the saved session. Open "
+                        + "music.youtube.com in the Sailfish browser (sign in if needed), then tap "
+                        + "Re-import below."
+                      : (app.backend.ytmLoggedIn
+                         ? ("Signed in"
+                            + (app.backend.ytmAccount ? " as " + app.backend.ytmAccount : "")
+                            + " — your personalized home, playlists and liked songs are available.")
+                         : "Browsing and playback work signed out. For your recommendations and "
+                           + "playlists: sign in to music.youtube.com in the Sailfish browser, then "
+                           + "tap Import from browser below. (Google blocks sign-in inside apps, so we "
+                           + "read the session from your real browser — nothing to copy.)")
+                color: app.backend.ytmSessionState === "expired"
+                       ? Theme.errorColor
+                       : (app.backend.ytmLoggedIn ? Theme.secondaryHighlightColor : Theme.secondaryColor)
                 font.pixelSize: Theme.fontSizeSmall
             }
 
@@ -50,8 +58,29 @@ Page {
 
             Button {
                 anchors.horizontalCenter: parent.horizontalCenter
-                text: app.backend.ytmLoggedIn ? "Re-import from browser" : "Import from browser"
+                text: (app.backend.ytmLoggedIn || app.backend.ytmSessionState === "expired")
+                      ? "Re-import from browser" : "Import from browser"
                 onClicked: app.backend.ytmImportBrowserLogin()
+            }
+            // Ask Google directly whether the stored session still works — turns the silent
+            // "signed in but only generic recommendations" state into a clear answer.
+            Button {
+                anchors.horizontalCenter: parent.horizontalCenter
+                visible: app.backend.ytmLoggedIn
+                text: "Check sign-in"
+                onClicked: {
+                    app.backend.ytmLoginMsg = "Checking with Google…"
+                    app.backend.verifySession(function(res) {
+                        if (!res || res.checked === false)
+                            app.backend.ytmLoginMsg = "Couldn't reach Google to check — try again."
+                        else if (res.ok)
+                            app.backend.ytmLoginMsg = "Signed in" + (res.account ? " as " + res.account : "") + "."
+                        else
+                            app.backend.ytmLoginMsg = "Session expired — Google no longer accepts it. "
+                                + "Open music.youtube.com in the Sailfish browser (sign in if needed), "
+                                + "then Re-import."
+                    })
+                }
             }
             Button {
                 anchors.horizontalCenter: parent.horizontalCenter

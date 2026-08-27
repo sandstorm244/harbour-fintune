@@ -60,6 +60,10 @@ Item {
     property string ytmLoginCode: ""     // the code the user types at google.com/device
     property string ytmLoginUrl: ""      // where to type it
     property string ytmLoginMsg: ""      // latest login status / error line
+    // Authoritative session state from verifySession: "" = never signed in, "live" = Google accepts
+    // it, "expired" = credentials stored but rejected (needs re-import). Drives the visual indicator.
+    property string ytmSessionState: ""
+    property string ytmAccount: ""       // signed-in account name (from the last successful verify)
 
     signal resolved(var info)
     signal resolveError(string message)
@@ -150,6 +154,22 @@ Item {
         })
     }
 
+    // Authoritative sign-in check: confirms Google still ACCEPTS the stored session (an idle session
+    // gets silently rejected while account_status still reports "signed in"). Only overrides
+    // ytmLoggedIn on a CONCLUSIVE result (res.checked) so a transient network error doesn't flip it.
+    // Callback gets {ok, account, checked}. Reports the account name on success.
+    function verifySession(callback) {
+        py.call("ytm.verify_session", [], function(res) {
+            if (res && res.checked) {
+                backend.ytmLoggedIn = !!res.ok
+                backend.ytmSessionState = res.present ? (res.ok ? "live" : "expired") : ""
+                backend.ytmAccount = res.ok ? (res.account || "") : ""
+            }
+            // res.checked === false is INCONCLUSIVE (offline) — leave the last known state alone.
+            if (callback) callback(res || {})
+        })
+    }
+
     // --- Play history (recently-played tracks) ---
     function musicRecordPlay(track) {
         if (!track || !track.videoId) return
@@ -203,6 +223,8 @@ Item {
             backend.ytmLoginCode = ""
             backend.ytmLoginUrl = ""
             backend.ytmLoginMsg = ""
+            backend.ytmSessionState = ""
+            backend.ytmAccount = ""
         })
     }
 
@@ -212,9 +234,20 @@ Item {
     function ytmImportBrowserLogin() {
         backend.ytmLoginMsg = "Importing from browser…"
         py.call("ytm.import_browser_login", [], function(res) {
-            if (res && res.ok) {
+            if (res && res.ok && res.live === false) {
+                // Cookies imported, but Google rejects the session — the browser session is stale.
+                backend.ytmLoggedIn = false
+                backend.ytmSessionState = "expired"
+                backend.ytmAccount = ""
+                backend.ytmLoginMsg = res.warning || "Imported, but the session looks signed out."
+                backend.ytmLoginFinished(false, backend.ytmLoginMsg)
+            } else if (res && res.ok) {
                 backend.ytmLoggedIn = true
-                backend.ytmLoginMsg = "Imported " + (res.count || 0) + " cookies."
+                backend.ytmSessionState = "live"
+                backend.ytmAccount = res.account || ""
+                backend.ytmLoginMsg = res.account
+                    ? ("Signed in as " + res.account + ".")
+                    : ("Imported " + (res.count || 0) + " cookies.")
                 backend.ytmLoginFinished(true, "")
             } else {
                 backend.ytmLoginMsg = (res && res.error) ? res.error : "Import failed."
@@ -442,6 +475,18 @@ Item {
         })
     }
 
+    // Session keep-alive: while signed in and the app is running (foreground OR background audio
+    // playback — SFOS keeps the process alive during playback), periodically make one authed call.
+    // verifySession hits account_menu, whose success path folds Google's cookie rotations back into
+    // the store (_absorb_rotations) — so this both KEEPS the session fresh off our own traffic and
+    // refreshes the indicator. Can't help while the app is fully closed/suspended (nothing runs then).
+    Timer {
+        interval: 15 * 60 * 1000     // 15 min — well inside the rotating-token lifetime
+        repeat: true
+        running: backend.ytmReady && backend.ytmLoggedIn
+        onTriggered: backend.verifySession()
+    }
+
     Python {
         id: py
         Component.onCompleted: {
@@ -459,7 +504,8 @@ Item {
             // The YouTube Music metadata layer (separate module, same worker).
             importModule("ytm", function() {
                 backend.ytmReady = true
-                backend.ytmAccountStatus()
+                backend.ytmAccountStatus()          // fast, presence-based (may be optimistically stale)
+                backend.verifySession()             // then correct it against what Google actually accepts
                 backend.loadDisliked()
                 backend.loadInnertubeIdentity()
             })

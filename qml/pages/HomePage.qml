@@ -131,15 +131,22 @@ Page {
                     spacing: Theme.paddingSmall
                     Label {
                         width: parent.width
-                        text: "Sign in for your recommendations"
+                        text: app.backend.ytmSessionState === "expired"
+                              ? "Your sign-in expired"
+                              : "Sign in for your recommendations"
                         font.pixelSize: Theme.fontSizeMedium
-                        color: Theme.highlightColor
+                        color: app.backend.ytmSessionState === "expired"
+                               ? Theme.errorColor : Theme.highlightColor
                         wrapMode: Text.Wrap
                     }
                     Label {
                         width: parent.width
-                        text: "Your Quick picks, Listen again and Mixed-for-you shelves appear "
-                              + "here once you're signed in. Tap to sign in."
+                        text: app.backend.ytmSessionState === "expired"
+                              ? "Google no longer accepts the saved session. Open music.youtube.com "
+                                + "in the Sailfish browser (sign in if needed), then re-import. "
+                                + "Tap for Settings."
+                              : "Your Quick picks, Listen again and Mixed-for-you shelves appear "
+                                + "here once you're signed in. Tap to sign in."
                         font.pixelSize: Theme.fontSizeExtraSmall
                         color: Theme.secondaryColor
                         wrapMode: Text.Wrap

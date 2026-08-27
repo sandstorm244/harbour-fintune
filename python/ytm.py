@@ -373,8 +373,50 @@ def logout():
 
 
 def account_status():
-    """For QML: are we signed in, and by which method (cookie / oauth / none)."""
+    """For QML: are we signed in, and by which method (cookie / oauth / none). NOTE this only
+    reflects that credentials are STORED, not that Google still accepts them — use verify_session()
+    for the authoritative check (an idle session can be silently rejected while this still says True)."""
     return {"logged_in": is_logged_in(), "method": _auth_mode()}
+
+
+def verify_session():
+    """Actively confirm Google still ACCEPTS the stored session, rather than merely that cookies
+    exist. This is the missing piece behind the classic "signed in but only generic recommendations"
+    symptom: after an idle stretch Google quietly rejects a stale session and serves anonymous
+    content with a 200 and no error, so is_logged_in() (presence-only) keeps reporting True.
+
+    Calls the authed account_menu endpoint and looks for the signed-in account header. Returns
+    {ok, account, checked}: `checked` is False when the call couldn't be made at all (offline / network
+    error) — an INCONCLUSIVE result the caller must NOT treat as logged-out; `ok` is meaningful only
+    when checked is True. ok=False + checked=True = Google is treating us as logged out → re-import."""
+    if _auth_mode() == "none":
+        return {"ok": False, "account": "", "checked": True, "present": False}
+    try:
+        data = _innertube("account/account_menu", {})
+    except Exception as ex:
+        _log("verify_session inconclusive: %s" % ex)
+        return {"ok": False, "account": "", "checked": False, "present": True}
+    # A signed-in account_menu carries an activeAccountHeaderRenderer with the account name; the
+    # anonymous menu does not. Search defensively (YouTube reshuffles the tree) for the first one.
+    found = {"name": ""}
+
+    def _scan(o):
+        if found["name"] or not isinstance(o, (dict, list)):
+            return
+        if isinstance(o, dict):
+            hdr = o.get("activeAccountHeaderRenderer")
+            if isinstance(hdr, dict):
+                runs = (hdr.get("accountName") or {}).get("runs") or []
+                found["name"] = "".join(r.get("text", "") for r in runs) or "your account"
+                return
+            for v in o.values():
+                _scan(v)
+        else:
+            for v in o:
+                _scan(v)
+
+    _scan(data)
+    return {"ok": bool(found["name"]), "account": found["name"], "checked": True, "present": True}
 
 
 def _access_token():
@@ -699,7 +741,17 @@ def import_browser_login():
                    "ytdlp": _netscape_from_rows(rows),
                    "source": used, "imported_at": int(time.time())})
     _log("imported %d cookies (%d rows) from %s" % (len(pairs), len(rows), used))
-    return {"ok": True, "count": len(pairs)}
+    # VALIDATE the session we just stored — importing cookies that Google already rejects is the
+    # exact trap behind "I re-imported but nothing changed". Only downgrade to live=False on a
+    # CONCLUSIVE logged-out result; an inconclusive check (offline) leaves it optimistic.
+    v = verify_session()
+    if v["checked"] and not v["ok"]:
+        return {"ok": True, "count": len(pairs), "live": False, "account": "",
+                "warning": "Imported the cookies, but Google still sees you as signed out — the "
+                           "browser's session is stale. In the Sailfish browser open "
+                           "music.youtube.com and make sure YOUR library and mixes load there "
+                           "(sign in again if they don't), then Import once more."}
+    return {"ok": True, "count": len(pairs), "live": True, "account": v.get("account", "")}
 
 
 def _sapisidhash(sapisid, origin):
