@@ -392,6 +392,10 @@ ApplicationWindow {
     }
     Timer { id: toastTimer; interval: 2500; onTriggered: app.toastText = "" }
 
+    // More-page ACTION dispatcher (see MorePage.qml). No action rows in FinTune yet; the stub keeps
+    // the converged MorePage's app.moreAction(key) reference safe if one is ever added.
+    function moreAction(key) { }
+
     // Download progress / completion → update the in-flight map + toast. The completed list is
     // refreshed by Backend's own event handler (loadDownloads on download_done).
     Connections {
@@ -599,9 +603,11 @@ ApplicationWindow {
         z: 1000
         anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
         height: Theme.itemSizeMedium
-        // Hidden while the full Now Playing page is up — it's redundant there.
-        visible: app.npActive && !(pageStack.currentPage
-                 && pageStack.currentPage.objectName === "nowPlaying")
+        // Hidden while the full Now Playing page is up (redundant there), and on pages that opt out
+        // via hideDock (More + its utility pages) so it can't cover their fixed bottom controls.
+        visible: app.npActive
+                 && !(pageStack.currentPage && pageStack.currentPage.objectName === "nowPlaying")
+                 && !(pageStack.currentPage && pageStack.currentPage.hideDock === true)
 
         Rectangle {
             anchors.fill: parent
