@@ -492,10 +492,28 @@ def _managed_ytdlp():
     return os.path.join(_data_dir(), "bin", "yt-dlp")
 
 
+def _system_binary(name):
+    """A user/system copy of `name` to fall back on when the app has no managed copy of its own. A
+    GUI-launched SFOS app runs with a TRIMMED PATH (no ~/.local/bin), so we consult PATH via `which`
+    AND the standard user-local / system spots explicitly — the same approach as _DENO_CANDIDATES.
+    Lets a user who keeps their own yt-dlp/ffmpeg (e.g. in ~/.local/bin, shared with other apps) skip
+    a second app-managed copy. A managed copy still WINS when present, so Install/Update always put the
+    app back in control of exactly what it runs. Returns an executable path, or None."""
+    found = shutil.which(name)
+    if found and os.access(found, os.X_OK):
+        return found
+    for p in (os.path.expanduser("~/.local/bin/" + name),
+              "/usr/local/bin/" + name, "/usr/bin/" + name):
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    return None
+
+
 def _ytdlp_path():
-    """FinTune's own managed yt-dlp, else FinTube's managed copy (same trust — app-installed via the
-    sibling app). No system/PATH fallback: a copy the app didn't install can't be updated (its
-    'Update' runs `yt-dlp -U` on our binary) or verified by it. Missing → the UI prompts a download."""
+    """yt-dlp for the app: FinTune's own managed copy, else FinTube's managed copy (same trust —
+    app-installed via the sibling app), else a user/system yt-dlp (PATH, ~/.local/bin, … — see
+    _system_binary) so a user's own copy is reused. Managed copies win so Install/Update stay in
+    control. Missing entirely → the UI prompts a download."""
     _ensure_deno_on_path()  # yt-dlp's bundled EJS challenge-solver needs Deno reachable on PATH
     managed = _managed_ytdlp()
     if os.path.isfile(managed) and os.access(managed, os.X_OK):
@@ -503,7 +521,7 @@ def _ytdlp_path():
     for p in _CANDIDATE_PATHS:
         if os.path.isfile(p) and os.access(p, os.X_OK):
             return p
-    return None
+    return _system_binary("yt-dlp")
 
 
 def ytdlp_version():
@@ -654,15 +672,16 @@ def _managed_ffmpeg():
 
 
 def _ffmpeg_path():
-    """FinTune's own managed ffmpeg, else FinTube's managed copy (read-only). No system/PATH
-    fallback (same reasoning as _ytdlp_path — only app-installed binaries the app can manage)."""
+    """ffmpeg for the app: FinTune's own managed copy, else FinTube's managed copy (read-only), else a
+    user/system ffmpeg (PATH, ~/.local/bin, … — see _system_binary). Managed copies win. None → the UI
+    offers a Download/Update button."""
     managed = _managed_ffmpeg()
     if os.path.isfile(managed) and os.access(managed, os.X_OK):
         return managed
     shared = os.path.join(_FINTUBE_DATA_DIR, "bin", "ffmpeg")
     if os.path.isfile(shared) and os.access(shared, os.X_OK):
         return shared
-    return None
+    return _system_binary("ffmpeg")
 
 
 def _ffmpeg_dir():
