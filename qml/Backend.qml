@@ -20,6 +20,7 @@ Item {
     property bool ffmpegInstalling: false
     property real ffmpegPct: -1
     property string ffmpegStatusMsg: ""
+    property bool ffmpegNeedsConfirm: false   // last install was refused for an unverified (unpinned) build (M12)
     property bool denoInstalling: false  // downloading Deno (the PO provider's runtime) into bin/
     property real denoPct: -1
     property string denoStatusMsg: ""
@@ -399,12 +400,13 @@ Item {
             backend.ffmpegReady = (v && v.length > 0)
         })
     }
-    function installFfmpeg() {
+    function installFfmpeg(allowUnpinned) {
         if (backend.ffmpegInstalling) return
         backend.ffmpegInstalling = true
         backend.ffmpegPct = 0
         backend.ffmpegStatusMsg = ""
-        py.call("youfish.install_ffmpeg", [], function() {})
+        backend.ffmpegNeedsConfirm = false
+        py.call("youfish.install_ffmpeg", [allowUnpinned === true], function() {})
     }
     // Download Deno (the PO provider's runtime) into our own bin/ — so the provider needs no
     // manual runtime install. ~40 MB one-time fetch; progress/result arrive as pyotherside events.
@@ -540,6 +542,7 @@ Item {
                 backend.ffmpegInstalling = false
                 backend.ffmpegPct = -1
                 backend.ffmpegStatusMsg = data[2]
+                backend.ffmpegNeedsConfirm = (data[4] === true)   // pin mismatch → offer override (M12)
                 if (data[3] && data[3].length > 0) {
                     backend.ffmpegVersion = data[3]
                     backend.ffmpegReady = true

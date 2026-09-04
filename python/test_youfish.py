@@ -146,6 +146,8 @@ class ResolveSmoke(unittest.TestCase):
         youfish._proxied = lambda url, *a, **k: url          # identity, so we can read it back
         youfish.get_settings = lambda: {"default_quality": 0, "hw_decode": False}
         youfish._cookies_args = self._no_cookies
+        youfish.invalidate_resolve_cache()   # resolve() is now cache-first (keyed by id+audio_only);
+                                             # every test reuses id "vid", so isolate each fixture
 
     def tearDown(self):
         for name, fn in self._saved.items():
@@ -197,6 +199,38 @@ class ResolveSmoke(unittest.TestCase):
         res = youfish.resolve("vid", True)
         self.assertFalse(res.get("ok"))
         self.assertIn("Sign in", res.get("error", ""))
+
+
+class ResolveCache(ResolveSmoke):
+    """resolve() is now cache-first: a repeat resolve is served from cache (no second yt-dlp spawn),
+    invalidate_resolve_cache() forces a refetch, and audio_only vs full resolves are keyed apart."""
+
+    def _counting_ytdlp(self, formats):
+        self.calls = 0
+        data = {"title": "T", "formats": formats, "duration": 100}
+        def fake_run(cmd, **kwargs):
+            self.calls += 1
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps(data), stderr="")
+        youfish.subprocess.run = fake_run
+
+    def test_second_resolve_hits_cache(self):
+        self._counting_ytdlp([af("251-0", 160, "opus", lang_pref=10), muxed()])
+        self.assertTrue(youfish.resolve("vid", True).get("ok"))
+        youfish.resolve("vid", True)
+        self.assertEqual(self.calls, 1)          # second call served from cache — no new spawn
+
+    def test_invalidate_forces_refetch(self):
+        self._counting_ytdlp([af("251-0", 160, "opus", lang_pref=10), muxed()])
+        youfish.resolve("vid", True)
+        youfish.invalidate_resolve_cache()
+        youfish.resolve("vid", True)
+        self.assertEqual(self.calls, 2)
+
+    def test_audio_only_keyed_apart_from_full(self):
+        self._counting_ytdlp([af("251-0", 160, "opus", lang_pref=10), muxed()])
+        youfish.resolve("vid", True)
+        youfish.resolve("vid", False)            # different key → not the audio_only entry → refetch
+        self.assertGreater(self.calls, 1)        # the full-resolve key missed the audio_only cache entry
 
 
 class YtmIdentity(unittest.TestCase):

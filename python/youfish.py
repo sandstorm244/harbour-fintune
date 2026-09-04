@@ -768,9 +768,11 @@ def _expected_ffmpeg_md5(ctx):
     return parts[0].strip().lower() if parts else None
 
 
-def install_ffmpeg():
-    """Download the static ffmpeg archive, verify its MD5, and unpack ffmpeg+ffprobe into our
-    bin/ (beside yt-dlp). HTTPS-only. Background thread; progress/result to QML via events."""
+def install_ffmpeg(allow_unpinned=False):
+    """Download the static ffmpeg archive and unpack ffmpeg+ffprobe into our bin/ (beside yt-dlp).
+    HTTPS-only. When a known-good SHA-256 is pinned, the extracted binary MUST match it or the
+    install is REFUSED (staged, never promoted over a working install) — `allow_unpinned=True`
+    accepts an unverified newer build after the user confirms. Background thread; events to QML."""
     import pyotherside
     import tarfile
 
@@ -808,14 +810,10 @@ def install_ffmpeg():
                 pyotherside.send("ffmpeg_install_done", False,
                                  "Checksum mismatch — download discarded, nothing installed", "")
                 return
-            if not _FFMPEG_SHA256 and expected and h.hexdigest().lower() != expected:
-                os.remove(tmp)
-                pyotherside.send("ffmpeg_install_done", False,
-                                 "Checksum mismatch — download discarded, nothing installed", "")
-                return
-            # Unpack just the two binaries, flattened into bin/. Write only the basename to our
-            # own directory, so a malicious path in the archive can't escape it.
-            got = []
+            # Unpack the two binaries to STAGING names first (basename only, so a malicious archive
+            # path can't escape our dir), so the pinned SHA-256 is verified BEFORE anything is promoted
+            # over an existing working install. (M12)
+            got = {}
             with tarfile.open(tmp, "r:xz") as tf:
                 for m in tf.getmembers():
                     base = os.path.basename(m.name)
@@ -823,34 +821,52 @@ def install_ffmpeg():
                         src = tf.extractfile(m)
                         if src is None:
                             continue
-                        outp = os.path.join(dest_dir, base)
-                        with open(outp, "wb") as out:
+                        stage = os.path.join(dest_dir, base + ".new")
+                        with open(stage, "wb") as out:
                             shutil.copyfileobj(src, out)
-                        os.chmod(outp, 0o755)
-                        got.append(base)
+                        os.chmod(stage, 0o755)
+                        got[base] = stage
             os.remove(tmp)
             tmp = None
+
+            def _discard_staged():
+                for p in got.values():
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
+
             if "ffmpeg" not in got:
+                _discard_staged()
                 pyotherside.send("ffmpeg_install_done", False,
                                  "Archive didn't contain an ffmpeg binary", "")
                 return
-            # Integrity: the archive was HTTPS + companion-MD5 verified above (transfer integrity).
-            # The pinned SHA-256 of the extracted binary is a KNOWN-GOOD marker, not a gate: when it
-            # matches we say so; when it doesn't, this is simply a newer JVS build (the release URL
-            # always points at the latest, and we can't pin a hash we've never seen), so we still
-            # install it. That's what keeps "download the latest ffmpeg" working without a rebuild.
+            # Integrity GATE (not just a marker): when a known-good SHA-256 is pinned, the extracted
+            # ffmpeg MUST match it. A mismatch is either a newer upstream build (the release URL always
+            # points at the latest, which we can't have pinned) OR a tampered binary from the single
+            # host we trust on TLS alone — we can't tell which, so we do NOT install it silently. The
+            # user can retry with allow_unpinned to accept an unverified newer build. (M12)
             pinned_ok = False
             if _FFMPEG_SHA256:
-                ffbin = os.path.join(dest_dir, "ffmpeg")
-                got_sha = _sha256_file(ffbin) if os.path.exists(ffbin) else ""
+                got_sha = _sha256_file(got["ffmpeg"])
                 pinned_ok = (got_sha == _FFMPEG_SHA256.strip().lower())
+                if not pinned_ok and not allow_unpinned:
+                    _discard_staged()
+                    pyotherside.send("ffmpeg_install_done", False,
+                                     "This ffmpeg build doesn't match the known-good pinned build — it "
+                                     "may be a newer release or tampered, so it was NOT installed. Use "
+                                     "“Install unverified build” to accept it anyway.", "", True)
+                    return
+            # Accepted (pin matched, no pin set, or the user overrode) — promote the staged binaries.
+            for base, stage in got.items():
+                os.replace(stage, os.path.join(dest_dir, base))
             ver = ffmpeg_version()  # exercises the binary — confirms it actually runs
             if ver:
                 note = "Installed ffmpeg " + ver
                 if pinned_ok:
                     note += " (SHA-256 verified — pinned build)"
                 elif _FFMPEG_SHA256:
-                    note += " (newer build — transfer verified, not pinned)"
+                    note += " (unverified build — accepted by you)"
                 elif not expected:
                     note += " (checksum unavailable, not verified)"
                 pyotherside.send("ffmpeg_install_done", True, note, ver)
@@ -869,10 +885,11 @@ def install_ffmpeg():
     return {"ok": True}
 
 
-def update_ffmpeg():
+def update_ffmpeg(allow_unpinned=False):
     """Fetch + install the latest static ffmpeg (the release URL always points at the current
-    build; this overwrites the existing binary). Same flow + events as install_ffmpeg()."""
-    return install_ffmpeg()
+    build). Same flow + events as install_ffmpeg(); `allow_unpinned` accepts an unverified newer
+    build the pinned SHA-256 can't vouch for (the user confirms via the Providers UI)."""
+    return install_ffmpeg(allow_unpinned)
 
 
 # --------------------------------------------------------------------------- #
@@ -1071,8 +1088,15 @@ def _pot_server_dir():
 
 
 def _pot_plugin_dir():
-    # Passed to yt-dlp via --plugin-dirs; must be the dir that CONTAINS yt_dlp_plugins/.
-    return os.path.join(_pot_repo_dir(), "plugin")
+    # The directory handed to yt-dlp's --plugin-dirs. yt-dlp DISCOVERS plugins by globbing one subdir
+    # level down (<dir>/*/yt_dlp_plugins — the same shape as its auto-scan of
+    # ~/.config/yt-dlp/plugins/<name>/yt_dlp_plugins), NOT <dir>/yt_dlp_plugins directly. The bgutil
+    # repo keeps the plugin at <repo>/plugin/yt_dlp_plugins, so we hand yt-dlp the REPO ROOT (it then
+    # finds <repo>/plugin/yt_dlp_plugins). Pointing straight at plugin/ (whose yt_dlp_plugins is a
+    # DIRECT child) matched the glob nothing → "Plugin directories: none", ZERO providers loaded, and
+    # the app silently ran only on a user's stray ~/.config install if any (measured on-device in
+    # FinTube 2026-09-02 — the managed plugin had never loaded via --plugin-dirs).
+    return _pot_repo_dir()
 
 
 def _pot_marker():
@@ -1135,9 +1159,14 @@ def _pot_server_flags():
 
 
 def _pot_ytdlp_args():
-    """--plugin-dirs pointing at the bgutil yt-dlp plugin when the provider is active; else
-    []. Keeps yt-dlp behaving exactly as before whenever the provider isn't set up/enabled."""
-    return ["--plugin-dirs", _pot_plugin_dir()] if _pot_active() else []
+    """yt-dlp args to load ONLY the app's own bundled bgutil plugin when the provider is active; else
+    []. `--no-plugin-dirs` FIRST empties yt-dlp's plugin search list — otherwise yt-dlp ALSO scans the
+    default ~/.config/yt-dlp/plugins and ~/.local/share dirs, and a user's stray manual bgutil install
+    there SHADOWS our managed copy (namespace import is first-match-wins, no warning — a stray older
+    build silently beats ours, and an older build won't mint the web_embedded token). Then
+    `--plugin-dirs` adds only our repo. Order matters: --no-plugin-dirs MUST come first, or it also
+    wipes our dir. Keeps yt-dlp untouched whenever the provider isn't set up/enabled."""
+    return ["--no-plugin-dirs", "--plugin-dirs", _pot_plugin_dir()] if _pot_active() else []
 
 
 def _pot_bind_localhost():
@@ -1269,15 +1298,37 @@ def _ensure_pot_server():
                 logf = open(os.path.join(_pot_dir(), "server.log"), "ab", buffering=0)
             except Exception:
                 logf = subprocess.DEVNULL
-            try:
-                _pot_proc = subprocess.Popen(
-                    _pot_server_flags(), cwd=_pot_server_dir(), env=env,
-                    stdout=logf, stderr=logf, stdin=subprocess.DEVNULL,
-                    preexec_fn=_set_pdeathsig)
-            except Exception as ex:
-                _pot_last_error = "Couldn't launch the Deno server: " + str(ex)
-                return False
-            atexit.register(stop_pot_server)
+            # Spawn on a DEDICATED long-lived daemon thread that then parks on the child for its
+            # whole life. PR_SET_PDEATHSIG is armed against the THREAD that forks the child, not the
+            # process — so if the sidecar were Popen'd on a short-lived caller (the install thread, a
+            # download thread, or a proxy reader-thread re-resolve) the kernel would SIGKILL it the
+            # instant that caller returned: the "server dies just after Provider ready" bug. Parking
+            # here keeps pdeathsig armed to fire only when the app itself exits, whoever asked to start it.
+            spawned = threading.Event()
+            def _own_pot_server():
+                global _pot_proc, _pot_last_error
+                try:
+                    proc = subprocess.Popen(
+                        _pot_server_flags(), cwd=_pot_server_dir(), env=env,
+                        stdout=logf, stderr=logf, stdin=subprocess.DEVNULL,
+                        preexec_fn=_set_pdeathsig)
+                except Exception as ex:
+                    _pot_last_error = "Couldn't launch the Deno server: " + str(ex)
+                    _pot_proc = None
+                    spawned.set()
+                    return
+                _pot_proc = proc
+                atexit.register(stop_pot_server)
+                spawned.set()
+                try:
+                    proc.wait()          # park for the child's whole life (pdeathsig stays armed here)
+                except Exception:
+                    pass
+            threading.Thread(target=_own_pot_server, daemon=True,
+                             name="pot-server-owner").start()
+            spawned.wait(5)              # the Popen is near-instant; let it happen before we poll
+            if _pot_proc is None:
+                return False             # Popen failed — _pot_last_error already set by the owner
         # The server LISTENS quickly; the BotGuard VM warms on the first token request,
         # which the yt-dlp plugin waits out itself — so we only wait for the port to open.
         deadline = time.time() + 25
@@ -1285,9 +1336,10 @@ def _ensure_pot_server():
             if _pot_ready_on_port():
                 _pot_last_error = ""
                 return True
-            if _pot_proc.poll() is not None:
+            if _pot_proc is None or _pot_proc.poll() is not None:
                 _pot_last_error = ("Provider server exited (code %s) just after starting — see the "
-                                   "server log in the diagnostics below." % _pot_proc.poll())
+                                   "server log in the diagnostics below."
+                                   % (_pot_proc.poll() if _pot_proc is not None else "?"))
                 return False   # died during startup — see potprovider/server.log
             time.sleep(0.3)
         _pot_last_error = "Provider server didn't open port %d within 25s." % _POT_PORT
@@ -1320,25 +1372,12 @@ def prewarm():
     _pot_rotate_log()   # fresh server.log per launch (keeps the previous one as server.log.prev)
     if not _pot_active():
         return
-    def _bg():
-        # PR_SET_PDEATHSIG on the Deno child is armed against the THREAD that spawns it — on Linux
-        # the parent-death signal is tied to the creating task, not the process. If this short-lived
-        # thread returned right after the server came up, the kernel would SIGKILL the child the
-        # instant the thread ends. THAT is why the sidecar only stayed up when a played track or the
-        # diagnostics started it (both run on the long-lived PyOtherSide worker thread) and silently
-        # died when prewarm started it at launch. So: skip if it's already listening, otherwise start
-        # it and PARK on the child for its whole life here — keeping pdeathsig correctly armed to fire
-        # when this daemon thread is torn down at app exit.
-        try:
-            if _pot_ready_on_port():
-                return
-            _ensure_pot_server()
-            proc = _pot_proc
-            if proc is not None and proc.poll() is None:
-                proc.wait()
-        except Exception:
-            pass
-    threading.Thread(target=_bg, daemon=True).start()
+    # _ensure_pot_server() now brings the sidecar up on its OWN dedicated owner thread that parks on
+    # the child (PR_SET_PDEATHSIG is armed against the forking thread, so it must be a long-lived
+    # one) — so prewarm just has to TRIGGER it off the UI path. A throwaway daemon thread is fine: it
+    # returns as soon as the port is up (or the 25s start times out), and the owner thread it spun up
+    # keeps the sidecar alive until app exit.
+    threading.Thread(target=_ensure_pot_server, daemon=True, name="pot-prewarm").start()
 
 
 def stop_pot_server():
@@ -1497,9 +1536,10 @@ def _pot_latest_tag():
         return ""
 
 
-def install_pot_provider(tag=None):
+def install_pot_provider(tag=None, persist_tag=False):
     """Clone + set up the bgutil PO-token provider (opt-in). Background thread; progress and
-    the final result go to QML via pyotherside, mirroring install_ytdlp().
+    the final result go to QML via pyotherside, mirroring install_ytdlp(). `persist_tag` records
+    the tag as the chosen `pot_tag` ONLY once the install succeeds (set by update_pot_provider).
 
     Deps are installed WITHOUT --allow-scripts, so npm lifecycle scripts never run during
     setup (node-canvas's native binary is skipped — jsdom degrades gracefully without it,
@@ -1523,20 +1563,24 @@ def install_pot_provider(tag=None):
                 return
             os.makedirs(_pot_dir(), exist_ok=True)
             repo = _pot_repo_dir()
-            if os.path.isdir(repo):
-                shutil.rmtree(repo, ignore_errors=True)   # clean (re)install
+            # Build into a STAGING dir and swap it in only once everything succeeds, so a failure
+            # partway through (network drop, bad tag, dep-install error) leaves any EXISTING working
+            # install untouched instead of destroying it up-front. (M3)
+            staging = repo + ".new"
+            shutil.rmtree(staging, ignore_errors=True)    # clear a stale temp from a prior failed run
             pyotherside.send("pot_install_progress", "Cloning provider (" + the_tag + ")…")
             cp = subprocess.run(
                 [git, "clone", "--depth", "1", "--branch", the_tag, "--single-branch",
-                 _POT_REPO, repo],
+                 _POT_REPO, staging],
                 capture_output=True, text=True, timeout=240)
             if cp.returncode != 0:
+                shutil.rmtree(staging, ignore_errors=True)
                 _pot_last_error = "Clone failed: " + (cp.stderr.strip()[-200:] or "git error")
                 pyotherside.send("pot_install_done", False,
                                  "Clone failed: " + (cp.stderr.strip()[-200:] or "git error"))
                 return
             pyotherside.send("pot_install_progress", "Installing dependencies (Deno)…")
-            server = _pot_server_dir()
+            server = os.path.join(staging, "server")
             lock = os.path.join(server, "deno.lock")
             base = [deno, "install"]
             if get_settings().get("pot_needs_ffi"):
@@ -1546,23 +1590,42 @@ def install_pot_provider(tag=None):
             if dp.returncode != 0 and "--frozen" in cmd:   # lock mismatch? retry unlocked
                 dp = subprocess.run(base, cwd=server, capture_output=True, text=True, timeout=900)
             if dp.returncode != 0:
+                shutil.rmtree(staging, ignore_errors=True)
                 _pot_last_error = "Dependency install failed: " + (dp.stderr.strip()[-200:] or "deno error")
                 pyotherside.send("pot_install_done", False,
                                  "Dependency install failed: " + (dp.stderr.strip()[-200:] or "deno error"))
                 return
             if not os.path.isfile(os.path.join(server, "src", "main.ts")):
+                shutil.rmtree(staging, ignore_errors=True)
                 pyotherside.send("pot_install_done", False,
                                  "Setup finished but the server entry is missing.")
                 return
+            # Staging built cleanly. Stop the OLD sidecar FIRST — otherwise it keeps serving on the
+            # port and _ensure_pot_server() below would see the port open and never restart, so an
+            # UPDATE would silently keep running the old server/plugin version. (M3)
+            stop_pot_server()
+            # Swap the new tree in with two same-filesystem renames (sub-millisecond window; the
+            # previous install stays recoverable under .old until the new one is promoted).
+            old = repo + ".old"
+            shutil.rmtree(old, ignore_errors=True)
+            if os.path.isdir(repo):
+                os.rename(repo, old)
+            os.rename(staging, repo)
+            shutil.rmtree(old, ignore_errors=True)
             with open(_pot_marker(), "w") as f:
                 f.write(the_tag)
+            if persist_tag:
+                set_setting("pot_tag", the_tag)  # remember the updated tag ONLY after a clean install
             set_setting("pot_provider", True)    # installed → enabled
-            _ensure_pot_server()                 # warm it now so the first video is instant
+            _ensure_pot_server()                 # fresh start (old one stopped above) so the new
+                                                 # server + plugin version actually takes effect
             pyotherside.send("pot_install_done", True,
                              "Provider ready (" + the_tag + "). Videos now fetch a per-video token.")
         except subprocess.TimeoutExpired:
+            shutil.rmtree(_pot_repo_dir() + ".new", ignore_errors=True)
             pyotherside.send("pot_install_done", False, "Setup timed out.")
         except Exception as ex:
+            shutil.rmtree(_pot_repo_dir() + ".new", ignore_errors=True)
             pyotherside.send("pot_install_done", False, str(ex))
 
     threading.Thread(target=run, daemon=True).start()
@@ -1579,8 +1642,9 @@ def update_pot_provider():
         pyotherside.send("pot_install_done", False,
                          "Couldn't reach GitHub to find the latest provider release.")
         return {"ok": False}
-    set_setting("pot_tag", latest)
-    return install_pot_provider(latest)
+    # Persist the new tag only AFTER a successful install (inside install_pot_provider) — otherwise a
+    # failed update would leave the setting claiming a version that was never actually installed. (M3)
+    return install_pot_provider(latest, persist_tag=True)
 
 
 # YouTube search filter tokens (the results-page `sp` query param — base64 of the filter
@@ -1673,7 +1737,233 @@ def search_suggestions(query):
         return {"ok": False, "suggestions": []}
 
 
+_resolve_cache = {}                        # key -> {"payload": {ok,info}, "good_until": epoch, "ts": epoch}
+_resolve_cache_lock = threading.Lock()
+_resolve_inflight = {}                     # key -> threading.Event (leader signals joiners)
+_RESOLVE_CACHE_MAX = 24
+_RESOLVE_CACHE_MAX_TTL = 20 * 60           # never trust an entry longer than this, even if expire is hours out
+_RESOLVE_SAFETY = 120                      # drop an entry this many secs BEFORE its URLs actually expire
+# D1: join ceiling. _resolve_uncached runs up to TWO subprocess.run(timeout=90) dumps
+# (primary + widen retry), so ~180s worst case. The joiner must wait PAST that, never
+# time out early and launch a second resolve. 200s covers 2x90s + margin.
+_RESOLVE_JOIN_TIMEOUT = 200
+
+_prefetch_sema = threading.BoundedSemaphore(2)   # <=2 speculative yt-dlp jobs at once (no swarm)
+_prefetch_pending = set()                  # keys queued/running as prefetch (debounce)
+_prefetch_lock = threading.Lock()
+
+_EXPIRE_RE = re.compile(r"(?:[?&]|%26|%3F|/)expire(?:=|/|%3D)(\d{9,11})", re.IGNORECASE)
+
+# D10: settings keys that change resolve()'s OUTPUT — a change to any of these drops the cache.
+_RESOLVE_OUTPUT_KEYS = ("default_quality", "audio_lang", "hw_decode",
+                        "player_client", "pot_provider")
+
+
+def _expire_ts(u):
+    """googlevideo `expire` unix-ts out of a URL — raw OR embedded/quoted in a proxied `u=`
+    param (where the real validity clock lives). 0 if none (HLS / odd shape)."""
+    if not u:
+        return 0
+    m = _EXPIRE_RE.search(u) or _EXPIRE_RE.search(urllib.parse.unquote(u))
+    return int(m.group(1)) if m else 0
+
+
+def _good_until(info):
+    """Earliest picked-URL expiry minus a safety margin, capped at a sane max. resolve() never
+    parses expire, so we do it here over muxed/video/audio URLs."""
+    now = time.time()
+    exps = [e for e in (_expire_ts(info.get("muxed_url")),
+                        _expire_ts(info.get("video_url")),
+                        _expire_ts(info.get("audio_url"))) if e]
+    if not exps:                           # HLS-only / no parseable expire -> short conservative TTL
+        return now + 5 * 60
+    return min(min(exps) - _RESOLVE_SAFETY, now + _RESOLVE_CACHE_MAX_TTL)
+
+
+def _signed_in():
+    """Coarse login state for the cache key (a login change alters extraction -> invalidates)."""
+    try:
+        import ytm
+        return bool(ytm.netscape_cookies())
+    except Exception:
+        return False
+
+
+def _resolve_key(video_id, audio_only=False):
+    """video_id PLUS every hidden input that changes resolve()'s output. caption_lang /
+    sponsorblock / hide_* are excluded — they don't affect the returned URLs."""
+    s = get_settings()
+    return "\x1f".join((
+        str(video_id),
+        _default_client() or "auto",               # player_client (effective) — client + UA + ladder
+        "1" if _pot_active() else "0",              # PO provider active -> flips client/token path
+        str(s.get("default_quality") or 0),         # video-rung cap
+        (s.get("audio_lang") or "").lower(),        # dub language
+        "1" if s.get("hw_decode") else "0",         # VP9<->H.264 codec preference
+        "1" if audio_only else "0",              # music: audio-only vs full-video resolve
+        "1" if _signed_in() else "0",               # login -> age/members/premium extraction
+    ))
+
+
+def _evict_resolve_cache_locked():
+    if len(_resolve_cache) <= _RESOLVE_CACHE_MAX:
+        return
+    victims = sorted(_resolve_cache.items(), key=lambda kv: kv[1]["ts"])[
+        :len(_resolve_cache) - _RESOLVE_CACHE_MAX]
+    for k, _ in victims:
+        _resolve_cache.pop(k, None)
+
+
+def _resolve_cache_get(key):
+    now = time.time()
+    with _resolve_cache_lock:
+        ent = _resolve_cache.get(key)
+        if ent and ent["good_until"] > now:
+            return ent["payload"]
+        if ent:
+            _resolve_cache.pop(key, None)          # expired -> drop
+    return None
+
+
+def invalidate_resolve_cache():
+    """Clear the whole resolve cache. Called on any output-affecting settings change and on
+    login/logout (cheap — small dict, refills on demand)."""
+    with _resolve_cache_lock:
+        _resolve_cache.clear()
+
+
+def _resolve_and_cache(video_id, audio_only=False, key=None, speculative=False):
+    """The one place a resolve actually happens. Cache hit -> instant. An in-flight resolve for
+    the SAME key -> JOINED (waited on), never double-spawned. Else run the real _resolve_uncached
+    and cache a fresh, non-live, full-ladder success. Runs the subprocess on WHATEVER thread calls
+    it, so the prefetch path MUST call it from a background thread (never the worker).
+
+    `speculative` is threaded for triggers (b)/(c) (D9): unused in #1, behaviour identical. Later
+    it will skip the widen retry (I9) and cap good_until (I12); do NOT branch on it yet."""
+    if key is None:
+        key = _resolve_key(video_id, audio_only)
+
+    hit = _resolve_cache_get(key)
+    if hit is not None:
+        return hit
+
+    with _resolve_cache_lock:
+        ev = _resolve_inflight.get(key)
+        if ev is None:
+            ev = threading.Event()
+            _resolve_inflight[key] = ev
+            leader = True
+        else:
+            leader = False
+
+    if not leader:                                 # ---- JOIN the in-flight resolve (D1) ----
+        if not ev.wait(_RESOLVE_JOIN_TIMEOUT):     # wait PAST the leader's 2x90s ceiling
+            hit = _resolve_cache_get(key)          # timed out (near-impossible): re-check cache
+            if hit is not None:
+                return hit
+            # NEVER launch a second subprocess. The leader is about to populate; a soft error
+            # lets QML retry — cheaper than a 2x resolve. (D1)
+            return {"ok": False, "error": "still resolving"}
+        hit = _resolve_cache_get(key)
+        if hit is not None:
+            return hit
+        # Leader finished but cached nothing (failure / live / degraded / stale key). Rare
+        # single double-spawn on the non-cacheable path only — acknowledged, not a swarm leak.
+        return _resolve_uncached(video_id, audio_only)
+
+    try:                                            # ---- LEADER ----
+        payload = _resolve_uncached(video_id, audio_only)
+        if payload.get("ok"):
+            info = payload.get("info") or {}
+            key2 = _resolve_key(video_id, audio_only)                       # D2: recompute AFTER the resolve
+            if audio_only:                                       # music: a usable audio result
+                full_ladder = bool(info.get("audio_url") or info.get("audio_urls")
+                                   or info.get("muxed_url"))
+            else:
+                full_ladder = bool((info.get("video_url") and info.get("audio_url"))
+                                   or info.get("qualities"))     # D4: HD pair or a real ladder
+            cacheable = (key2 == key                             # D2: world didn't move under us
+                         and not info.get("is_live")             # D3: never cache live
+                         and full_ladder)                        # D4: never cache muxed-only
+            if cacheable:
+                gu = _good_until(info)
+                if gu > time.time() + 5:                         # only store something worth serving
+                    with _resolve_cache_lock:
+                        _resolve_cache[key] = {"payload": payload,
+                                               "good_until": gu, "ts": time.time()}
+                        _evict_resolve_cache_locked()
+        # Failure / live / degraded / stale-key: returned to the immediate caller, NOT cached
+        # (a transient bot-wall or SABR-thin window must re-resolve fresh on the next tap).
+        return payload
+    finally:
+        with _resolve_cache_lock:
+            _resolve_inflight.pop(key, None)
+        ev.set()
+
+
+def prefetch_resolve(video_id, audio_only=False, speculative=False):
+    """PyOtherSide entry: kick a speculative resolve on a BACKGROUND thread, return instantly.
+    Deduped (one per key), capped at 2 concurrent spawns. A key already fresh in cache, already
+    in flight, or over the cap is a fast no-op. `speculative` is the (b)/(c) seam (D9)."""
+    if not video_id:
+        return {"ok": True, "queued": False}
+    key = _resolve_key(video_id, audio_only)
+
+    if _resolve_cache_get(key) is not None:
+        return {"ok": True, "queued": False, "cached": True}
+
+    with _prefetch_lock:
+        if key in _prefetch_pending:
+            return {"ok": True, "queued": False, "inflight": True}
+        _prefetch_pending.add(key)
+
+    def _bg():
+        # D7: a throwaway prefetch thread must NEVER be the one to START/restart the POT sidecar
+        # — PR_SET_PDEATHSIG arms against THIS short-lived thread, so the kernel would SIGKILL the
+        # sidecar the instant _bg returns, sabotaging the worker's token source. Defer to prewarm's
+        # parked, correctly-armed thread and skip this speculative attempt (it warms on the next
+        # prefetch or the real foreground tap).
+        if _pot_active() and not _pot_ready_on_port():
+            try:
+                prewarm()
+            except Exception:
+                pass
+            with _prefetch_lock:
+                _prefetch_pending.discard(key)
+            return
+        # Non-blocking acquire = DROP at the 2-spawn ceiling (don't queue a swarm).
+        if not _prefetch_sema.acquire(blocking=False):
+            with _prefetch_lock:
+                _prefetch_pending.discard(key)
+            return
+        try:
+            _resolve_and_cache(video_id, audio_only, key, speculative=speculative)
+        except Exception:
+            pass
+        finally:
+            _prefetch_sema.release()
+            with _prefetch_lock:
+                _prefetch_pending.discard(key)
+
+    try:
+        threading.Thread(target=_bg, daemon=True).start()
+    except Exception:
+        # D5: thread/FD exhaustion under a scroll burst — discard the key so a failed start can't
+        # wedge this video as permanently "pending" (mirrors _bg's finally).
+        with _prefetch_lock:
+            _prefetch_pending.discard(key)
+        return {"ok": False, "queued": False, "error": "spawn failed"}
+    return {"ok": True, "queued": True}
+
+
 def resolve(video_id, audio_only=False):
+    """Cache-first resolve. A fresh cached result returns instantly; an in-flight resolve for the
+    SAME key is joined rather than double-spawned; otherwise the real extraction runs and a fresh,
+    non-live success is cached. Same {ok, info|error} shape as before — callers are unchanged."""
+    return _resolve_and_cache(video_id, audio_only)
+
+
+def _resolve_uncached(video_id, audio_only=False):
     """Resolve a video to playable stream URLs.
 
     `muxed_url` (single stream, routed through the local proxy) feeds the prototype
@@ -2074,6 +2364,25 @@ def _channel_entry(e):
 _dir_ready = False
 
 
+def _atomic_write_json(path, obj):
+    """Write obj as JSON to `path` atomically: a private (0600) temp in the same dir, then
+    os.replace() over the target (atomic on POSIX) so a crash / battery-pull / ENOSPC mid-write
+    can never truncate the live store (a truncated store loads as {} and the next save would then
+    persist the wipe). Raises on failure, leaving the existing file untouched."""
+    d = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".tmp-", dir=d)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(obj, f)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+        raise
+
+
 def _data_dir():
     """FinTune's own data dir (separate from FinTube's — no shared settings/tokens).
     We still *reuse* FinTube's downloaded yt-dlp/ffmpeg binaries read-only where they
@@ -2168,8 +2477,7 @@ def set_setting(key, value):
     s[key] = value
     try:
         path = _settings_path()
-        with open(path, "w") as f:
-            json.dump(s, f)
+        _atomic_write_json(path, s)
         os.chmod(path, 0o600)     # owner-only (privacy)
     except Exception:
         pass
@@ -2256,8 +2564,7 @@ def set_position(video_id, seconds):
     if len(d) > 300:
         d = dict(list(d.items())[-300:])
     try:
-        with open(_positions_path(), "w") as f:
-            json.dump(d, f)
+        _atomic_write_json(_positions_path(), d)
     except Exception:
         pass
 
@@ -2304,8 +2611,7 @@ def list_subscriptions():
 
 def _save_subscriptions(subs):
     try:
-        with open(_subs_path(), "w") as fh:
-            json.dump(subs, fh)
+        _atomic_write_json(_subs_path(), subs)
     except Exception:
         pass
 
@@ -2526,8 +2832,7 @@ def _import_newpipe_db(con):
             merged = dict(list(merged.items())[-500:])
         if hist_added:
             try:
-                with open(_watch_history_path(), "w") as f:
-                    json.dump(merged, f)
+                _atomic_write_json(_watch_history_path(), merged)
             except Exception:
                 pass
 
@@ -2545,8 +2850,7 @@ def _import_newpipe_db(con):
             if len(positions) > 300:
                 positions = dict(list(positions.items())[-300:])
             try:
-                with open(_positions_path(), "w") as f:
-                    json.dump(positions, f)
+                _atomic_write_json(_positions_path(), positions)
             except Exception:
                 pass
 
@@ -2966,8 +3270,7 @@ def list_downloads():
 
 def _save_downloads(lst):
     try:
-        with open(_downloads_path(), "w") as f:
-            json.dump(lst, f)
+        _atomic_write_json(_downloads_path(), lst)
     except Exception:
         pass
 
@@ -3098,8 +3401,7 @@ def _load_playlists():
 
 def _save_playlists(lst):
     try:
-        with open(_playlists_path(), "w") as f:
-            json.dump(lst, f)
+        _atomic_write_json(_playlists_path(), lst)
     except Exception:
         pass
 
