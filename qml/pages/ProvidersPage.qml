@@ -1,8 +1,9 @@
 import QtQuick 2.0
 import Sailfish.Silica 1.0
 
-// Providers — the third-party tools the app manages for you: yt-dlp (the extractor), ffmpeg (HD
-// download merging) and the optional PO-token provider (Deno sidecar) that unlocks full quality.
+// Providers — the third-party tools the app manages for you: yt-dlp (the extractor, plus its
+// importable fast-resolve copy) and the optional PO-token provider (Deno sidecar) that unlocks
+// gated tracks. No ffmpeg here: audio downloads are single-file m4a, nothing ever needs merging.
 // Split out of Settings to keep that panel focused on playback. Reached from Home → More → Providers.
 Page {
     id: page
@@ -119,8 +120,13 @@ Page {
                             page.ytdlpStatus = "Downloading yt-dlp…"
                             app.backend.installYtdlp()
                         } else {
-                            page.ytdlpStatus = "Updating yt-dlp…"
+                            // Keep the in-process zipapp in lockstep with the binary so a YouTube
+                            // breakage fix reaches the fast path too (else it silently stays stale).
+                            page.ytdlpStatus = app.backend.fastResolveInstalled
+                                ? "Updating yt-dlp + fast-resolve copy…" : "Updating yt-dlp…"
                             app.backend.updateYtdlp()
+                            if (app.backend.fastResolveInstalled)
+                                app.backend.installFastResolve()
                         }
                     }
                 }
@@ -178,58 +184,65 @@ Page {
                 }
             }
 
-            SectionHeader { text: "ffmpeg" }
-
-            Label {
-                x: Theme.horizontalPageMargin
-                width: parent.width - 2 * Theme.horizontalPageMargin
-                wrapMode: Text.Wrap
-                text: app.backend.ffmpegInstalling
-                      ? ("Downloading ffmpeg… " + Math.round(app.backend.ffmpegPct) + "%")
-                      : (app.backend.ffmpegReady
-                         ? ("Installed — " + app.backend.ffmpegVersion)
-                         : "Optional. Lets downloads merge separate HD video + audio into one "
-                           + "file; without it, video downloads fall back to 360p. Tap Download "
-                           + "to fetch a static build into the app's folder.")
-                color: app.backend.ffmpegReady ? Theme.secondaryHighlightColor : Theme.secondaryColor
-                font.pixelSize: Theme.fontSizeSmall
+            // Experimental: run yt-dlp IN-PROCESS for the token-free hot path — no ~1.3s binary
+            // respawn per resolve, and the player-JS / n-sig caches stay warm across tracks (the
+            // difference between a snappy skip and a multi-second one). First enable fetches a
+            // small importable yt-dlp; the binary above stays the default AND the fallback.
+            TextSwitch {
+                visible: app.backend.ready
+                text: "Fast resolve (experimental)"
+                description: app.backend.fastResolveInstalling
+                    ? ("Downloading the importable yt-dlp… "
+                       + Math.round(app.backend.fastResolvePct) + "%")
+                    : (app.backend.fastResolveInstalled
+                       ? ("Runs yt-dlp in-process (no per-resolve respawn) using the imported yt-dlp "
+                          + app.backend.fastResolveVersion
+                          + ". Any error falls back to the binary above.")
+                       : "Downloads a small importable yt-dlp, then runs it in-process for faster "
+                         + "track starts. The binary stays the fallback.")
+                automaticCheck: false
+                checked: app.backend.fastResolve
+                enabled: !app.backend.fastResolveInstalling
+                onClicked: {
+                    if (app.backend.fastResolve) {
+                        app.backend.setFastResolve(false)
+                    } else if (app.backend.fastResolveInstalled) {
+                        app.backend.setFastResolve(true)
+                    } else {
+                        app.backend.installFastResolve()   // fetch the zipapp…
+                        app.backend.setFastResolve(true)   // …and switch on (activates once it lands)
+                    }
+                }
             }
 
             Label {
-                visible: app.backend.ffmpegStatusMsg.length > 0 && !app.backend.ffmpegInstalling
+                visible: app.backend.fastResolveStatusMsg.length > 0
                 x: Theme.horizontalPageMargin
                 width: parent.width - 2 * Theme.horizontalPageMargin
                 wrapMode: Text.Wrap
-                text: app.backend.ffmpegStatusMsg
+                text: app.backend.fastResolveStatusMsg
                 color: Theme.secondaryColor
                 font.pixelSize: Theme.fontSizeExtraSmall
             }
 
-            Row {
-                anchors.horizontalCenter: parent.horizontalCenter
-                spacing: Theme.paddingMedium
-
-                Button {
-                    text: app.backend.ffmpegInstalling
-                          ? (Math.round(app.backend.ffmpegPct) + "%")
-                          : (app.backend.ffmpegReady ? "Update" : "Download")
-                    enabled: !app.backend.ffmpegInstalling
-                    onClicked: app.backend.installFfmpeg()
-                }
-                Button {
-                    text: "Recheck"
-                    enabled: !app.backend.ffmpegInstalling
-                    onClicked: app.backend.recheckFfmpeg()
-                }
-            }
-
-            // Shown only when the last download was refused because its SHA-256 didn't match the
-            // pinned known-good build — an explicit opt-in to install the unverified newer build. (M12)
-            Button {
-                anchors.horizontalCenter: parent.horizontalCenter
-                visible: app.backend.ffmpegNeedsConfirm && !app.backend.ffmpegInstalling
-                text: "Install unverified build"
-                onClicked: app.backend.installFfmpeg(true)
+            // Version-skew alarm: the fast path runs whatever zipapp is on disk, so a copy older
+            // than the binary quietly misses the breakage fix an Update just delivered (it fails
+            // or thins out in-process and every resolve detours through the binary). Also covers
+            // the shared-install case: when FinTune runs FinTube's binary + zipapp, an update from
+            // either app can leave the pair split until Update is tapped again.
+            Label {
+                visible: app.backend.fastResolveInstalled
+                         && app.backend.ytdlpVersion.length > 0
+                         && app.backend.fastResolveVersion.length > 0
+                         && app.backend.fastResolveVersion !== app.backend.ytdlpVersion
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * Theme.horizontalPageMargin
+                wrapMode: Text.Wrap
+                text: "Fast-resolve copy (" + app.backend.fastResolveVersion
+                      + ") is out of step with the yt-dlp binary (" + app.backend.ytdlpVersion
+                      + ") — tap Update above to refresh both."
+                color: Theme.secondaryHighlightColor
+                font.pixelSize: Theme.fontSizeExtraSmall
             }
 
             SectionHeader { text: "PO token provider" }
@@ -283,12 +296,16 @@ Page {
                 font.pixelSize: Theme.fontSizeExtraSmall
             }
 
+            // Visible when Deno is missing, OR when the APP-MANAGED copy is in use — that copy
+            // has no other updater (the button hid forever once any Deno existed, so a managed
+            // Deno stayed at its install-day version for life). A system/user Deno stays theirs.
             Button {
                 visible: !app.backend.potDeno || app.backend.denoInstalling
+                         || app.backend.potDenoManaged
                 anchors.horizontalCenter: parent.horizontalCenter
                 text: app.backend.denoInstalling
                       ? ("Downloading Deno… " + Math.round(app.backend.denoPct) + "%")
-                      : "Download Deno"
+                      : (app.backend.potDeno ? "Update Deno" : "Download Deno")
                 enabled: !app.backend.denoInstalling
                 onClicked: app.backend.installDeno()
             }
@@ -400,6 +417,6 @@ Page {
         anchors.centerIn: parent
         size: BusyIndicatorSize.Large
         running: app.backend.updating || app.backend.installing || app.backend.potInstalling
-                 || app.backend.ffmpegInstalling || app.backend.denoInstalling
+                 || app.backend.fastResolveInstalling || app.backend.denoInstalling
     }
 }

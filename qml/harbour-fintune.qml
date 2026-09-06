@@ -39,10 +39,10 @@ ApplicationWindow {
     property bool   hasNext: app.playQueueIndex >= 0 && app.playQueueIndex + 1 < app.playQueue.length
     property bool   hasPrev: app.playQueueIndex > 0
 
-    // Prefetch + radio: resolveCache holds pre-resolved stream info by videoId so a skip/advance
-    // is instant; radioLoading guards the autoplay-continuation fetch; npFailStreak bounds
-    // auto-skipping so an all-failing queue can't spin forever.
-    property var    resolveCache: ({})
+    // Prefetch + radio: the NEXT track is pre-resolved into the PYTHON engine's cache
+    // (prefetchNext), so a skip/advance's resolve() is an instant cache hit; radioLoading guards
+    // the autoplay-continuation fetch; npFailStreak bounds auto-skipping so an all-failing queue
+    // can't spin forever.
     property bool   radioLoading: false
     property int    npFailStreak: 0
 
@@ -179,7 +179,6 @@ ApplicationWindow {
     function playQueueList(items, startIndex) {
         if (!items || items.length === 0)
             return
-        app.resolveCache = ({})        // fresh context — drop prefetches from the old queue
         app.npFailStreak = 0
         app.playQueue = items
         app.playQueueIndex = Math.max(0, Math.min(startIndex || 0, items.length - 1))
@@ -193,6 +192,8 @@ ApplicationWindow {
         var it = app.playQueue[app.playQueueIndex]
         if (!it || !it.videoId)
             return
+        if (app.npId && app.npId !== it.videoId)
+            backend.releasePlayback(app.npId)   // stop the old track's proxy streams right away
         app.npId = it.videoId
         app.npTitle = it.title || ""
         app.npArtist = it.subtitle || ""
@@ -209,14 +210,10 @@ ApplicationWindow {
             app.npResolving = false
             app.applyResolved({ audio_urls: [app.fileUri(localPath)], http_ua: "" })
         } else {
-            var cached = app.resolveCache[it.videoId]
-            if (cached) {
-                app.npResolving = false
-                app.applyResolved(cached)      // prefetched → start with no wait
-            } else {
-                app.npResolving = true
-                backend.resolve(it.videoId)    // resolved() → applyResolved()
-            }
+            // A prefetched track (prefetchNext) is already in the engine's resolve cache, so
+            // this resolve() returns instantly for it; anything else resolves live.
+            app.npResolving = true
+            backend.resolve(it.videoId)        // resolved() → applyResolved()
         }
         if (openNp)
             openNowPlaying()
@@ -484,19 +481,14 @@ ApplicationWindow {
     }
 
     // Prefetch the NEXT queued track's stream info while the current one plays, so advancing is
-    // instant. Cached by videoId; a stale cached URL self-heals via the proxy's re-resolve-on-403,
-    // so entries never need explicit expiry within a session.
+    // instant. The engine dedups repeat prefetches, caches with a URL-expiry-derived TTL, and
+    // runs on its own background thread — the UI's Python worker never blocks on this.
     function prefetchNext() {
         if (!app.hasNext)
             return
         var nx = app.playQueue[app.playQueueIndex + 1]
-        if (!nx || !nx.videoId || app.resolveCache[nx.videoId])
-            return
-        var vid = nx.videoId
-        backend.prefetchResolve(vid, function(info) {
-            if (info)
-                app.resolveCache[vid] = info
-        })
+        if (nx && nx.videoId)
+            backend.prefetchResolve(nx.videoId)
     }
 
     // Queue ran dry → continue with the current track's song radio (YouTube Music autoplay).

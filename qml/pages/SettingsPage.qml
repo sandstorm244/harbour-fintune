@@ -2,8 +2,8 @@ import QtQuick 2.0
 import Sailfish.Silica 1.0
 import Sailfish.Pickers 1.0
 
-// App settings — account, appearance and playback. Third-party tool management (yt-dlp, ffmpeg,
-// PO-token provider) lives on its own Providers page, reached from Home → More → Providers.
+// App settings — account, appearance and playback. Third-party tool management (yt-dlp, fast
+// resolve, PO-token provider) lives on its own Providers page, reached from Home → More → Providers.
 Page {
     id: page
     allowedOrientations: Orientation.All

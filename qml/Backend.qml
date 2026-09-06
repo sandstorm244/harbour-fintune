@@ -15,12 +15,14 @@ Item {
     property bool updating: false
     property bool installing: false      // downloading yt-dlp into the app data dir
     property real installPct: -1
-    property bool ffmpegReady: false     // ffmpeg present (bundled/system) → HD merged downloads
-    property string ffmpegVersion: ""
-    property bool ffmpegInstalling: false
-    property real ffmpegPct: -1
-    property string ffmpegStatusMsg: ""
-    property bool ffmpegNeedsConfirm: false   // last install was refused for an unverified (unpinned) build (M12)
+    // Fast resolve (experimental): run yt-dlp IN-PROCESS (imported zipapp) for the token-free hot
+    // resolve — removes the ~1.3s per-resolve spawn tax. The binary stays default + fallback.
+    property bool fastResolve: false         // the setting is ON
+    property bool fastResolveInstalled: false// the importable yt-dlp zipapp is present
+    property string fastResolveVersion: ""   // installed zipapp version
+    property bool fastResolveInstalling: false
+    property real fastResolvePct: -1
+    property string fastResolveStatusMsg: ""
     property bool denoInstalling: false  // downloading Deno (the PO provider's runtime) into bin/
     property real denoPct: -1
     property string denoStatusMsg: ""
@@ -49,6 +51,7 @@ Item {
     property string potServerVersion: "" // version the running provider reports (from its /ping)
     property string potLastError: ""     // why the provider last failed to start / respond (diagnostics)
     property string potDenoPath: ""      // where Deno was found ("" = not found)
+    property bool potDenoManaged: false  // the Deno in use is OUR downloaded copy → we can update it
 
     // Download folder — where downloaded tracks are written. downloadDir is the configured value
     // ("" = the app's own folder); downloadDirEffective is the absolute path actually in use.
@@ -79,19 +82,25 @@ Item {
     signal ytmLoginFinished(bool ok, string message)
 
     function resolve(videoId) {
-        // audio_only=true → single yt-dlp pass (skip the HD-video-pair retry); much faster start.
-        py.call("youfish.resolve", [videoId, true], function(res) {
+        // The engine is audio-only, so no flags: one yt-dlp pass on the common path.
+        py.call("youfish.resolve", [videoId], function(res) {
             if (res && res.ok) backend.resolved(res.info)
             else backend.resolveError(res ? res.error : "resolve failed")
         })
     }
 
-    // Resolve into a caller callback instead of the shared `resolved` signal — used to prefetch
-    // the NEXT track while the current one plays, without disturbing current playback.
-    function prefetchResolve(videoId, callback) {
-        py.call("youfish.resolve", [videoId, true], function(res) {
-            callback(res && res.ok ? res.info : null)
-        })
+    // Warm the NEXT track's stream info while the current one plays. prefetch_resolve returns
+    // instantly and resolves on a PYTHON background thread into the engine's resolve cache — so
+    // the eventual resolve() is a cache hit AND the shared PyOtherSide worker never blocks on a
+    // multi-second prefetch (a py.call'd resolve would queue every UI call behind it).
+    function prefetchResolve(videoId) {
+        py.call("youfish.prefetch_resolve", [videoId], function() {})
+    }
+
+    // Free the proxy's download streams for a track we've moved away from (skip/advance). The
+    // idle reaper would get there anyway; this just stops the bandwidth immediately.
+    function releasePlayback(videoId) {
+        if (videoId) py.call("youfish.release_playback", [videoId], function() {})
     }
 
     // Song radio (autoplay continuation) for a videoId → caller callback.
@@ -278,6 +287,7 @@ Item {
             backend.boostGain = s.boost_gain || 1.0
             backend.autoplay = (s.autoplay === undefined) ? true : !!s.autoplay
             backend.skipDisliked = !!s.skip_disliked
+            backend.fastResolve = !!s.fast_resolve
         })
     }
 
@@ -393,29 +403,39 @@ Item {
         })
     }
 
-    // ffmpeg — optional, enables HD merged downloads. Managed like yt-dlp (bundled binary).
-    function recheckFfmpeg() {
-        py.call("youfish.ffmpeg_version", [], function(v) {
-            backend.ffmpegVersion = v || ""
-            backend.ffmpegReady = (v && v.length > 0)
-        })
-    }
-    function installFfmpeg(allowUnpinned) {
-        if (backend.ffmpegInstalling) return
-        backend.ffmpegInstalling = true
-        backend.ffmpegPct = 0
-        backend.ffmpegStatusMsg = ""
-        backend.ffmpegNeedsConfirm = false
-        py.call("youfish.install_ffmpeg", [allowUnpinned === true], function() {})
-    }
     // Download Deno (the PO provider's runtime) into our own bin/ — so the provider needs no
     // manual runtime install. ~40 MB one-time fetch; progress/result arrive as pyotherside events.
+    // Also serves as "Update Deno" for a managed copy (it just refetches the latest).
     function installDeno() {
         if (backend.denoInstalling) return
         backend.denoInstalling = true
         backend.denoPct = 0
         backend.denoStatusMsg = ""
         py.call("youfish.install_deno", [], function() {})
+    }
+
+    // --- Fast resolve (experimental): in-process yt-dlp. Status + install + on/off ---
+    function loadFastResolveStatus() {
+        py.call("youfish.fast_resolve_status", [], function(s) {
+            if (!s) return
+            backend.fastResolve = !!s.enabled
+            backend.fastResolveInstalled = !!s.installed
+            backend.fastResolveVersion = s.version || ""
+        })
+    }
+    // Fetch the small importable yt-dlp zipapp. Progress/result arrive as pyotherside
+    // events (see onReceived), mirroring installYtdlp.
+    function installFastResolve() {
+        if (backend.fastResolveInstalling) return
+        backend.fastResolveInstalling = true
+        backend.fastResolvePct = 0
+        backend.fastResolveStatusMsg = "Downloading the importable yt-dlp…"
+        py.call("youfish.install_ytdlp_zipapp", [], function() {})
+    }
+    function setFastResolve(on) {
+        py.call("youfish.set_setting", ["fast_resolve", !!on], function(s) {
+            if (s) backend.fastResolve = !!s.fast_resolve
+        })
     }
 
     // --- PO-token provider (bgutil): opt-in setup + on/off, all driven from Python ---
@@ -426,6 +446,7 @@ Item {
             backend.potEnabled = !!s.enabled
             backend.potDeno = !!s.deno
             backend.potDenoPath = s.deno_path || ""
+            backend.potDenoManaged = !!s.deno_managed
             backend.potRunning = !!s.running
             backend.potResponding = !!s.responding
             backend.potServerVersion = s.server_version || ""
@@ -501,12 +522,12 @@ Item {
             importModule("youfish", function() {
                 backend.pyReady = true
                 backend.recheck()
-                backend.recheckFfmpeg()
                 backend.loadSettings()
                 backend.loadDownloads()
                 backend.loadDownloadLocation()
                 backend.loadPotStatus()
-                py.call("youfish.prewarm", [], function() {})  // POT server up before first play
+                backend.loadFastResolveStatus()
+                py.call("youfish.prewarm", [], function() {})  // POT server + warm zipapp import
             })
             // The YouTube Music metadata layer (separate module, same worker).
             importModule("ytm", function() {
@@ -536,17 +557,15 @@ Item {
                 }
                 backend.updateFinished(!!data[1], data[2])
             }
-            else if (data[0] === "ffmpeg_install_progress")
-                backend.ffmpegPct = data[1]
-            else if (data[0] === "ffmpeg_install_done") {
-                backend.ffmpegInstalling = false
-                backend.ffmpegPct = -1
-                backend.ffmpegStatusMsg = data[2]
-                backend.ffmpegNeedsConfirm = (data[4] === true)   // pin mismatch → offer override (M12)
-                if (data[3] && data[3].length > 0) {
-                    backend.ffmpegVersion = data[3]
-                    backend.ffmpegReady = true
-                }
+            else if (data[0] === "ytdlp_zipapp_progress")
+                backend.fastResolvePct = data[1]
+            else if (data[0] === "ytdlp_zipapp_done") {
+                backend.fastResolveInstalling = false
+                backend.fastResolvePct = -1
+                backend.fastResolveStatusMsg = data[2]
+                if (data[3] && data[3].length > 0)
+                    backend.fastResolveVersion = data[3]
+                backend.loadFastResolveStatus()   // refresh installed/version from disk truth
             }
             else if (data[0] === "deno_install_progress")
                 backend.denoPct = data[1]
