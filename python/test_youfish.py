@@ -131,7 +131,7 @@ class ResolveSmoke(unittest.TestCase):
         self._saved["run"] = youfish.subprocess.run
 
         youfish._ytdlp_path = lambda: "/fake/yt-dlp"
-        youfish._ensure_pot_server = lambda: True
+        youfish._ensure_pot_server = lambda **kw: True
         youfish._pot_ytdlp_args = lambda: []
         youfish._yt_extractor_args = lambda client_override=None, want_pot=False: []
         youfish._proxied = lambda url, *a, **k: url
@@ -613,7 +613,7 @@ class FastResolveRouting(unittest.TestCase):
         self._tls = youfish._inproc_tls
 
         youfish._ytdlp_path = lambda: "/fake/yt-dlp"
-        youfish._ensure_pot_server = lambda: True
+        youfish._ensure_pot_server = lambda **kw: True
         youfish._pot_ytdlp_args = lambda: []
         youfish._pot_active = lambda: False          # no probe / token path in the common case
         youfish._proxied = lambda url, *a, **k: url
@@ -701,7 +701,7 @@ class AnonymousPrimary(unittest.TestCase):
             self._saved[name] = getattr(youfish, name)
         self._run = youfish.subprocess.run
         youfish._ytdlp_path = lambda: "/fake/yt-dlp"
-        youfish._ensure_pot_server = lambda: True
+        youfish._ensure_pot_server = lambda **kw: True
         youfish._pot_ytdlp_args = lambda: []
         youfish._pot_active = lambda: False
         youfish._proxied = lambda url, *a, **k: url
@@ -766,7 +766,7 @@ class ReresolveAnonFirst(unittest.TestCase):
                            imp=youfish._import_yt_dlp)
         youfish._ytdlp_path = lambda: "/bin/yt-dlp"
         youfish._pot_active = lambda: True
-        youfish._ensure_pot_server = lambda: True
+        youfish._ensure_pot_server = lambda **kw: True
         youfish._write_cookies_temp = lambda: ""   # signed out → _cookies_args yields []
         youfish.get_settings = lambda: {}
         youfish._import_yt_dlp = lambda: None   # zipapp pinned absent → binary path
@@ -1186,7 +1186,7 @@ class DownloadAudioMeta(unittest.TestCase):
         self._tmp = tempfile.mkdtemp(prefix="dlmeta-")
         youfish._ytdlp_path = lambda: "/fake/yt-dlp"
         youfish._write_cookies_temp = lambda: ""
-        youfish._ensure_pot_server = lambda: True
+        youfish._ensure_pot_server = lambda **kw: True
         youfish._yt_extractor_args = lambda client_override=None, want_pot=False: []
         youfish._pot_ytdlp_args = lambda: []
         youfish._downloads_dir = lambda: self._tmp
@@ -1304,6 +1304,25 @@ class YtmIdentity(unittest.TestCase):
     def test_scrape_rejects_bogus_version(self):
         _key, ver = self._scrape('<script>{"INNERTUBE_CLIENT_VERSION":"garbage"}</script>')
         self.assertIsNone(ver)   # the sanity check drops a value that isn't a 1.YYYYMMDD.xx.xx
+
+
+class PotEnsureBudget(unittest.TestCase):
+    """_ensure_pot_server(wait=) must give up quickly when another thread owns an in-flight
+    boot (holds the lock) — the resolve hot path passes a short grace instead of joining a
+    slow boot (field log 2026-09-08: 40s waiting on a server that never came up)."""
+
+    def test_budget_respected_while_boot_in_flight(self):
+        saved = (youfish._pot_active, youfish._pot_ready_on_port)
+        youfish._pot_active = lambda: True
+        youfish._pot_ready_on_port = lambda timeout=0.25: False
+        self.assertTrue(youfish._pot_lock.acquire(timeout=1))   # simulate prewarm mid-boot
+        try:
+            t0 = time.time()
+            self.assertFalse(youfish._ensure_pot_server(wait=0.3))
+            self.assertLess(time.time() - t0, 2.0)   # gave up within the grace, not 25s
+        finally:
+            youfish._pot_lock.release()
+            youfish._pot_active, youfish._pot_ready_on_port = saved
 
 
 if __name__ == "__main__":

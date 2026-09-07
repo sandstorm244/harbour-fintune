@@ -10,6 +10,7 @@ Item {
     // True once we've confirmed a working yt-dlp is present.
     property bool ready: false
     property bool pyReady: false         // youfish (engine) imported and callable
+    property bool fastLaneReady: false   // pyFast (the playback lane) imported and callable
     property bool ytmReady: false        // ytm (YouTube Music metadata) imported and callable
     property string ytdlpVersion: ""
     property bool updating: false
@@ -85,7 +86,10 @@ Item {
 
     function resolve(videoId) {
         // The engine is audio-only, so no flags: one yt-dlp pass on the common path.
-        py.call("youfish.resolve", [videoId], function(res) {
+        // Ride the fast lane: the main worker's queue serializes every py/ytm call, so a slow
+        // browse/home fetch (or a dammed background job) would make a track tap wait its turn.
+        var lane = backend.fastLaneReady ? pyFast : py
+        lane.call("youfish.resolve", [videoId], function(res) {
             if (res && res.ok) backend.resolved(res.info)
             else backend.resolveError(res ? res.error : "resolve failed")
         })
@@ -96,7 +100,10 @@ Item {
     // the eventual resolve() is a cache hit AND the shared PyOtherSide worker never blocks on a
     // multi-second prefetch (a py.call'd resolve would queue every UI call behind it).
     function prefetchResolve(videoId) {
-        py.call("youfish.prefetch_resolve", [videoId], function() {})
+        // Python-side it returns instantly (work moves to a python thread), but the CALL still
+        // queues — behind a busy main worker the warm-up would fire late. Fast lane.
+        var lane = backend.fastLaneReady ? pyFast : py
+        lane.call("youfish.prefetch_resolve", [videoId], function() {})
     }
 
     // Free the proxy's download streams for a track we've moved away from (skip/advance). The
@@ -602,5 +609,24 @@ Item {
             }
         }
         onError: console.log("python error: " + traceback)
+    }
+
+    // The playback fast lane: a second PyOtherSide element = its OWN worker thread (the
+    // interpreter underneath is shared, so module state and caches are the same objects).
+    // Every py.call above shares py's single queue, where one slow job dams everything
+    // behind it — resolve()/prefetchResolve() ride here instead, so starting a track never
+    // waits behind browse/home fetches. youfish is built for cross-thread use (per-thread
+    // YoutubeDL; the prefetch threads already exercise it). Declared AFTER py so
+    // pyotherside.send events keep arriving at py's onReceived whichever instance
+    // pyotherside routes them to. ytm stays on py — only playback rides here.
+    Python {
+        id: pyFast
+        Component.onCompleted: {
+            addImportPath(Qt.resolvedUrl("../python").toString().replace("file://", ""))
+            // Same module as py — python's import lock guarantees exactly one full module
+            // initialization no matter which element's import wins the race.
+            importModule("youfish", function() { backend.fastLaneReady = true })
+        }
+        onError: console.log("python error (fast lane): " + traceback)
     }
 }
