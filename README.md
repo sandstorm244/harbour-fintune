@@ -17,8 +17,10 @@ C++ GStreamer player.
   in-process and served through a localhost proxy, and a **property-based opus/AAC
   fallback ladder** (source language over dubs) walks YouTube's per-video codec
   gating, with a self-healing re-resolve behind it.
-- **Fast resolve** *(opt-in)* — runs yt-dlp in-process from an importable copy, no
-  per-track binary spawn; the binary stays the default *and* the fallback.
+- **Fast resolve** — runs yt-dlp in-process from an importable copy, no per-track
+  binary spawn. Not a setting: automatic wherever the OS Python can run it
+  (SFOS 5.1+), with the copy installed and updated alongside the binary; older
+  devices just use the self-contained binary, which stays the fallback everywhere.
 - **Queue & radio** — album/playlist queues, up-next view, play-next /
   add-to-queue, next-track prefetch (skips are instant), radio autoplay when the
   queue runs dry, repeat modes.

@@ -39,6 +39,7 @@ import socket
 import socketserver
 import ssl
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -49,6 +50,14 @@ import uuid
 
 _BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36")
+
+# Whether the DEVICE python can run the in-process fast-resolve zipapp at all. yt-dlp
+# requires Python >= 3.10 (verified 2026-09: SFOS 5.1 ships 3.11 — fine; SFOS <= 5.0 ships
+# 3.8 — never). The frozen binary bundles its OWN modern Python, which is exactly why it
+# stays the universal default and fallback. Gates the in-process path and the launch-time
+# zipapp autofetch; bump when upstream moves again — going stale is safe (the import just
+# fails once and every resolve takes the binary).
+_FAST_RESOLVE_PY_OK = sys.version_info >= (3, 10)
 
 # Flags applied to every network-facing yt-dlp call. -4 forces IPv4: dual-stack connects
 # can hang when a network advertises IPv6 routes it can't actually carry.
@@ -317,10 +326,14 @@ def _plog(msg):
 
 def _tlog(msg):
     """Timing trace to stdout (visible under YOUFISH_DEBUG, like ytm's [ytm] lines) — for
-    profiling start latency. Cheap; compiled out in normal use by the _DEBUG gate."""
+    profiling start latency. Cheap; compiled out in normal use by the _DEBUG gate.
+    Wall-clock stamped so field logs expose the *gaps between* lines (a stall in untimed
+    code is invisible to per-step durations alone)."""
     if _DEBUG:
         try:
-            print("[youfish/t] " + msg)
+            now = time.time()
+            print("[youfish/t %s.%03d] %s"
+                  % (time.strftime("%H:%M:%S", time.localtime(now)), int(now % 1 * 1000), msg))
         except Exception:
             pass
 
@@ -1655,7 +1668,7 @@ def install_ytdlp():
 
 
 # --------------------------------------------------------------------------- #
-# Fast resolve (experimental): run yt-dlp IN-PROCESS instead of spawning the frozen
+# Fast resolve: run yt-dlp IN-PROCESS instead of spawning the frozen
 # binary. That binary is a PyInstaller onefile — it re-unpacks to TMPDIR and re-imports
 # yt_dlp on EVERY call (~1.3s spawn tax on this CPU). Importing yt-dlp ONCE and keeping
 # a warm YoutubeDL in the worker removes that tax and keeps the player-JS / n-sig caches
@@ -1705,12 +1718,16 @@ def _zipapp_version(path):
 
 
 def fast_resolve_status():
-    """For the settings UI: is the in-process fast-resolve path opted-in and set up?"""
+    """For the Providers UI: is the in-process fast-resolve copy set up — and can this
+    device's python run it at all (python_ok drives the honest why-not text). NOT a
+    setting: fast resolve engages automatically wherever python_ok holds and the copy
+    exists; the binary is always the fallback."""
     path = _ytdlp_zipapp_read_path()
     present = os.path.isfile(path)
-    return {"enabled": bool(get_settings().get("fast_resolve")),
-            "installed": present,
-            "version": _zipapp_version(path) if present else ""}
+    return {"installed": present,
+            "version": _zipapp_version(path) if present else "",
+            "python_ok": _FAST_RESOLVE_PY_OK,
+            "python_version": "%d.%d" % sys.version_info[:2]}
 
 
 def install_ytdlp_zipapp():
@@ -1788,6 +1805,29 @@ def install_ytdlp_zipapp():
     return {"ok": True}
 
 
+_ZIPAPP_AUTOFETCH_DONE = False
+
+
+def _autofetch_zipapp():
+    """Self-heal the fast-resolve copy at launch, once per process: a capable device that
+    already has the yt-dlp binary (so the user consented to yt-dlp — the zipapp is the same
+    software in importable form, from the same release) but no zipapp fetches one in the
+    background. A shared FinTube copy counts as present (that's the read path). A failure
+    stays silent and leaves the binary in charge; the next launch or an Update tap retries.
+    This is what keeps "the copy always exists" true for installs that predate it — there
+    is no settings row to re-enable."""
+    global _ZIPAPP_AUTOFETCH_DONE
+    if _ZIPAPP_AUTOFETCH_DONE or not _FAST_RESOLVE_PY_OK:
+        return
+    _ZIPAPP_AUTOFETCH_DONE = True
+    try:
+        if os.path.isfile(_ytdlp_zipapp_read_path()) or not _ytdlp_path():
+            return
+    except Exception:
+        return
+    install_ytdlp_zipapp()
+
+
 # ---- in-process extraction (the warm path) --------------------------------- #
 
 _YT_DLP_MOD = None
@@ -1820,6 +1860,8 @@ def _import_yt_dlp():
     the zipapp at the FRONT of sys.path makes zipimport load OUR yt_dlp regardless of any system
     copy. One-time and irreversible for the process — an updated zip takes effect next launch."""
     global _YT_DLP_MOD, _YT_DLP_IMPORT_DONE
+    if not _FAST_RESOLVE_PY_OK:
+        return None      # the device python can't run yt-dlp at all — the single gate point
     if _YT_DLP_IMPORT_DONE:
         return _YT_DLP_MOD
     with _yt_dlp_import_lock:
@@ -1847,8 +1889,10 @@ def _import_yt_dlp():
 
 
 def _fast_resolve_ready():
-    """True only when the user opted in AND the importable yt-dlp actually loaded."""
-    return bool(get_settings().get("fast_resolve")) and _import_yt_dlp() is not None
+    """True when the importable yt-dlp actually loaded (the device-python gate lives at the
+    top of _import_yt_dlp). No user setting — in-process is automatic, the binary is the
+    fallback, not an option."""
+    return _import_yt_dlp() is not None
 
 
 def _parse_extractor_args(extra):
@@ -2368,12 +2412,16 @@ def _pot_http_ping(timeout=1.5):
 
 
 def _pot_of(u):
-    """DEBUG: the streaming PO-token (`pot=`) state of a googlevideo URL, WITHOUT leaking the token
-    — 'MISSING' when there's no pot= param, else its length + 8-char prefix. Used to tell a cold,
-    tokenless URL (the one that 403s at byte 0) apart from a valid one during instant-403 profiling."""
+    """DEBUG: the streaming PO-token (`pot=`) state of a googlevideo URL, WITHOUT leaking the
+    token — 'no-url' when the pick has no URL at all (a genuinely dead pick), 'no-pot' when the
+    URL just carries no pot= param (NORMAL for token-free clients like the anonymous tv_embedded
+    primary — only suspect when that same stream 403s at byte 0), else the token's length +
+    8-char prefix. The old single 'MISSING' label conflated those two very different states."""
+    if not u:
+        return "no-url"
     try:
-        p = urllib.parse.parse_qs(urllib.parse.urlparse(u or "").query).get("pot", [""])[0]
-        return ("len=%d pfx=%s" % (len(p), p[:8])) if p else "MISSING"
+        p = urllib.parse.parse_qs(urllib.parse.urlparse(u).query).get("pot", [""])[0]
+        return ("len=%d pfx=%s" % (len(p), p[:8])) if p else "no-pot"
     except Exception:
         return "?"
 
@@ -2552,9 +2600,11 @@ def prewarm():
         threading.Thread(target=_spawn_tax_probe, daemon=True).start()
     # Fast resolve: import the yt-dlp zipapp NOW, on a throwaway thread, so the first resolve of the
     # session doesn't pay the ~1.5s `import yt_dlp` on its critical path. The import is module-global
-    # (see _import_yt_dlp), so any thread warms it; a no-op when opted out or already imported.
-    if get_settings().get("fast_resolve"):
-        threading.Thread(target=_import_yt_dlp, daemon=True, name="ytdlp-import-prewarm").start()
+    # (see _import_yt_dlp), so any thread warms it; a no-op on a too-old device python, before the
+    # zipapp arrives, or once already imported. _autofetch_zipapp then backfills a missing copy in
+    # the background (once per launch) so fast resolve just exists wherever it can run.
+    threading.Thread(target=_import_yt_dlp, daemon=True, name="ytdlp-import-prewarm").start()
+    _autofetch_zipapp()
     _pot_rotate_log()   # fresh server.log per launch (keeps the previous one as server.log.prev)
     if not _pot_active():
         return
@@ -3131,13 +3181,12 @@ _SETTINGS_DEFAULTS = {"player_client": "",
                       # PO-token provider (bgutil): opt-in, user-installed. pot_needs_ffi
                       # stays False unless a build genuinely needs node-canvas's native addon
                       # (jsdom degrades gracefully without it).
-                      "pot_provider": False, "pot_needs_ffi": False,
-                      # Fast resolve (experimental): run yt-dlp IN-PROCESS (an imported zipapp)
-                      # for the token-free hot dump instead of spawning the frozen binary — drops
-                      # the ~1.3s per-resolve spawn tax and keeps the player-JS / n-sig caches warm
-                      # across resolves. Opt-in; needs the importable zipapp (install_ytdlp_zipapp).
-                      # The binary stays the resilient default AND the fallback for every failure.
-                      "fast_resolve": False}
+                      "pot_provider": False, "pot_needs_ffi": False}
+# Fast resolve (in-process yt-dlp) deliberately has NO settings key: it is not a preference
+# but plumbing. It engages automatically wherever the device python can run it and the
+# importable copy exists (installed with the binary, refreshed by Update, backfilled at
+# launch by _autofetch_zipapp); the binary stays the fallback for every failure. A stale
+# "fast_resolve" key from older builds may linger in settings.json — it is simply ignored.
 
 # Widened client net, tried in ONE extra yt-dlp pass when the primary (tv_embedded, or
 # yt-dlp's auto pick when no provider is set up) hard-fails on a bot-wall or returned
