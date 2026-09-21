@@ -1,5 +1,5 @@
 import QtQuick 2.0
-import org.nemomobile.mpris 1.0
+import Amber.Mpris 1.0
 
 // MPRIS media control — lockscreen widget + media keys. Loaded via a Loader so that if the
 // org.nemomobile.mpris plugin isn't installed, this file simply fails to load rather than
@@ -7,6 +7,10 @@ import org.nemomobile.mpris 1.0
 MprisPlayer {
     id: mpris
     property var np: null
+    property string title: ""
+    property string artist: ""
+    property string artUrl: ""
+    property int duration: 0
 
     serviceName: "fintune"
     identity: "FinTune"
@@ -21,19 +25,8 @@ MprisPlayer {
     canRaise: false
 
     playbackStatus: (np && np.active)
-        ? (np.playing ? Mpris.Playing : Mpris.Paused)
-        : Mpris.Stopped
-
-    metadata: {
-        var m = {}
-        if (np && np.title && np.title.length > 0)
-            m[Mpris.metadataToString(Mpris.Title)] = np.title
-        if (np && np.channel && np.channel.length > 0)
-            m[Mpris.metadataToString(Mpris.Artist)] = [np.channel]
-        if (np && np.thumb && np.thumb.length > 0)
-            m[Mpris.metadataToString(Mpris.ArtUrl)] = np.thumb
-        return m
-    }
+                    ? (np.playing ? Mpris.Playing : Mpris.Paused)
+                    : Mpris.Stopped
 
     onPlayPauseRequested: if (np) np.toggleRequested()
     onPlayRequested: if (np && !np.playing) np.toggleRequested()
@@ -41,4 +34,13 @@ MprisPlayer {
     onStopRequested: if (np && np.playing) np.toggleRequested()
     onNextRequested: if (np) np.nextRequested()
     onPreviousRequested: if (np) np.prevRequested()
+
+    //MetaData changes
+    onTitleChanged: mpris.metaData.title = mpris.title
+    onArtistChanged: mpris.metaData.contributingArtist = mpris.artist
+    onArtUrlChanged: mpris.metaData.artUrl = mpris.artUrl
+    onDurationChanged: mpris.metaData.duration = mpris.duration
+
+    //
+    onPositionRequested: mpris.position = np.position
 }

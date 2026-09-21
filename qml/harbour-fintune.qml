@@ -91,6 +91,8 @@ ApplicationWindow {
         property bool playing: player.playing
         property bool hasNext: app.npActive        // radio always continues → next is available
         property bool hasPrev: app.hasPrev
+        property int duration: player.duration
+        property int position: player.position
         signal toggleRequested()
         signal stopRequested()
         signal nextRequested()
@@ -122,12 +124,13 @@ ApplicationWindow {
     }
     Component.onCompleted: app.applyAudio()
 
-    // Optional MPRIS (lockscreen) controls, isolated so a missing plugin degrades quietly.
-    Loader {
-        source: Qt.resolvedUrl("MprisControls.qml")
-        onLoaded: item.np = nowPlaying
-        onStatusChanged: if (status === Loader.Error)
-            console.log("FinTune: MPRIS unavailable (org.nemomobile.mpris not installed)")
+    // MPRIS (lockscreen) controls.
+    MprisControls {
+        np: nowPlaying
+        title: nowPlaying.title
+        duration: nowPlaying.duration
+        artUrl: nowPlaying.thumb
+        artist: nowPlaying.channel
     }
 
     // --- Playback control (drives the global player) ---
