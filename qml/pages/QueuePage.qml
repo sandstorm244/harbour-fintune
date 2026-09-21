@@ -12,6 +12,13 @@ Page {
         anchors.fill: parent
         bottomMargin: app.npActive ? Theme.itemSizeMedium : 0
 
+        PullDownMenu {
+            MenuItem {
+                text: app.shuffle ? "Shuffle: on" : "Shuffle: off"
+                onClicked: app.setShuffle(!app.shuffle)
+            }
+        }
+
         header: PageHeader { title: "Up next" }
         model: app.playQueue
 

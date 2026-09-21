@@ -21,6 +21,21 @@ Page {
         return m + ":" + (r < 10 ? "0" + r : r)
     }
 
+    // Friendly name for a SponsorBlock category (used on the manual-skip button).
+    function sbLabel(category) {
+        switch (category) {
+        case "sponsor":        return qsTr("sponsor")
+        case "selfpromo":      return qsTr("self-promo")
+        case "interaction":    return qsTr("interaction")
+        case "intro":          return qsTr("intro")
+        case "outro":          return qsTr("outro")
+        case "preview":        return qsTr("preview")
+        case "filler":         return qsTr("filler")
+        case "music_offtopic": return qsTr("non-music")
+        default:               return qsTr("segment")
+        }
+    }
+
     // --- Blurred album-art backdrop ---
     // The cover art, blown up and blurred, fills the page behind everything; a scrim over it
     // keeps the title / times / controls readable on any artwork. The crisp cover in the middle
@@ -227,10 +242,15 @@ Page {
                     enabled: app.npActive
                     onClicked: app.playNext()
                 }
-                // Invisible counterweight to the repeat button, keeping play/pause centred.
-                Item {
+                // Shuffle toggle: dim when off, accent when on. Same footprint as the repeat
+                // button on the left, so it doubles as the counterweight that keeps play centred.
+                IconButton {
                     anchors.verticalCenter: parent.verticalCenter
                     width: repeatBtn.width; height: repeatBtn.height
+                    icon.source: "image://theme/icon-m-shuffle?"
+                                 + (app.shuffle ? Theme.highlightColor
+                                                : Theme.secondaryColor)
+                    onClicked: app.setShuffle(!app.shuffle)
                 }
             }
         }
@@ -331,6 +351,19 @@ Page {
                         }
                     }
                 }
+            }
+
+            // SponsorBlock manual-skip: shows while the playhead is inside a segment the user set
+            // to "Show skip button" (per-category action). Tapping jumps past it.
+            Button {
+                anchors {
+                    horizontalCenter: parent.horizontalCenter
+                    bottom: parent.bottom; bottomMargin: Theme.paddingLarge
+                }
+                visible: !!app.npManualSeg
+                text: app.npManualSeg ? qsTr("Skip %1").arg(page.sbLabel(app.npManualSeg.category))
+                                      : qsTr("Skip")
+                onClicked: app.skipManualSeg()
             }
         }
     }

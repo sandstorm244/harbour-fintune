@@ -45,6 +45,14 @@ Page {
 
         PullDownMenu {
             MenuItem {
+                text: "Download all"
+                enabled: page.tracks.length > 0
+                // A remorse timer gives a cancel window before a big batch starts — handy given
+                // downloads are serial + paced (a long playlist takes a while).
+                onClicked: dlRemorse.execute("Downloading " + page.tracks.length + " songs",
+                                             function() { app.downloadAll(page.tracks) })
+            }
+            MenuItem {
                 text: "Play all"
                 enabled: page.tracks.length > 0
                 onClicked: app.playQueueList(page.tracks, 0)
@@ -145,4 +153,6 @@ Page {
 
         VerticalScrollDecorator { }
     }
+
+    RemorsePopup { id: dlRemorse }   // cancel window for "Download all"
 }

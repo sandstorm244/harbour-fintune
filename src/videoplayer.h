@@ -81,6 +81,11 @@ public:
     // doesn't hard-clip (the distortion raw >100% causes). gain is linear (1.0 = no boost).
     Q_INVOKABLE void setBoost(double gain);
 
+    // Per-track loudness normalization gain (linear, 1.0 = no change). Set from QML per track,
+    // derived from YouTube's loudnessDb, and applied by a dedicated volume element before the
+    // boost + limiter so tracks play at a consistent level. Persists across pipeline rebuilds.
+    Q_INVOKABLE void setNormGain(double gain);
+
 signals:
     void videoUrlChanged();
     void audioUrlChanged();
@@ -147,6 +152,9 @@ private:
     GstElement *m_boost = nullptr;
     GstElement *m_limiter = nullptr;
     double m_boostGain = 1.0;
+    // Per-track loudness normalization: a volume element before the boost, driven by setNormGain.
+    GstElement *m_norm = nullptr;
+    double m_normGain = 1.0;
     // Mode-independent handles onto the video branch: m_videoInput is what the decoded video
     // pad links into (videoconvert in SW, droideglsink in HW); m_videoSink is the branch tail
     // we address for seeks (appsink in SW, droideglsink in HW).

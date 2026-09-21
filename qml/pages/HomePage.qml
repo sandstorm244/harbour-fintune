@@ -60,7 +60,8 @@ Page {
                     { title: "Downloads", desc: "Offline tracks", page: "DownloadsPage.qml" },
                     { title: "History", desc: "Recently played", page: "HistoryPage.qml" },
                     { title: "Settings", desc: "Account, appearance, playback", page: "SettingsPage.qml" },
-                    { title: "Providers", desc: "yt-dlp, fast resolve, PO-token provider", page: "ProvidersPage.qml" }
+                    { title: "Providers", desc: "yt-dlp, fast resolve, PO-token provider", page: "ProvidersPage.qml" },
+                    { title: "SponsorBlock", desc: "Skip sponsors and other segments", page: "SponsorBlockPage.qml" }
                 ]
             })
         }

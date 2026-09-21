@@ -37,10 +37,17 @@ Item {
     property bool eqEnabled: false       // 10-band equalizer on/off
     property var  eqBands: [0,0,0,0,0,0,0,0,0,0]  // per-band gain (dB), applied by the C++ player
     property real boostGain: 1.0         // volume boost (linear, 1.0 = none) above system max
+    property bool normalizeVolume: false // even out per-track loudness (YouTube loudnessDb → gain)
+    property real normMaxBoostDb: 12.0   // ceiling on normalization boost (0 = attenuate-only)
     property bool autoplay: true         // keep playing related songs (radio) when the queue ends
     property bool skipDisliked: false    // auto-skip disliked songs during autoplay
     property var  dislikedIds: []        // videoIds you've disliked (for skip-disliked)
     property var downloads: []           // completed downloads [{id,title,kind,path}]
+
+    // SponsorBlock: skip community-marked segments. sbActions maps a category → "skip" (auto) or
+    // "manual" (tap-to-skip button); an absent category is off. Applied client-side by the player.
+    property bool sponsorBlock: true
+    property var  sbActions: ({"sponsor": "skip", "selfpromo": "skip", "interaction": "skip"})
 
     // PO-token provider (bgutil) — opt-in, user-installed Deno sidecar (see SettingsPage).
     property bool potInstalled: false
@@ -334,8 +341,13 @@ Item {
             if (s.eq_bands && s.eq_bands.length === 10)
                 backend.eqBands = s.eq_bands
             backend.boostGain = s.boost_gain || 1.0
+            backend.normalizeVolume = !!s.normalize_volume
+            backend.normMaxBoostDb = (s.norm_max_boost_db === undefined) ? 12.0 : s.norm_max_boost_db
             backend.autoplay = (s.autoplay === undefined) ? true : !!s.autoplay
             backend.skipDisliked = !!s.skip_disliked
+            backend.sponsorBlock = (s.sponsorblock === undefined) ? true : !!s.sponsorblock
+            if (s.sponsorblock_actions && typeof s.sponsorblock_actions === "object")
+                backend.sbActions = s.sponsorblock_actions
         })
     }
 
@@ -347,6 +359,35 @@ Item {
     function setSkipDisliked(on) {
         py.call("youfish.set_setting", ["skip_disliked", !!on], function(s) {
             if (s) backend.skipDisliked = !!s.skip_disliked
+        })
+    }
+
+    // --- SponsorBlock: master switch, per-category action, and the per-track segment fetch ---
+    function setSponsorBlock(on) {
+        py.call("youfish.set_setting", ["sponsorblock", !!on], function(s) {
+            if (s) backend.sponsorBlock = !!s.sponsorblock
+        })
+    }
+    // Set one category's action ("skip"|"manual"|"off") and persist the whole map. Writing the full
+    // dict (set_setting replaces a key wholesale) keeps it in one atomic write.
+    function setSponsorAction(category, action) {
+        if (!category) return
+        var m = {}
+        var cur = backend.sbActions || {}
+        for (var k in cur) m[k] = cur[k]     // shallow copy so the property change is observed
+        if (action === "skip" || action === "manual") m[category] = action
+        else delete m[category]              // "off" = simply absent
+        backend.sbActions = m                // optimistic; mirrored back below
+        py.call("youfish.set_setting", ["sponsorblock_actions", m], function(s) {
+            if (s && s.sponsorblock_actions && typeof s.sponsorblock_actions === "object")
+                backend.sbActions = s.sponsorblock_actions
+        })
+    }
+    // SponsorBlock segments for a track → caller callback ([{start,end,category}], seconds). Falls
+    // back to segments cached on the downloaded copy when offline (handled Python-side).
+    function sponsorSegments(videoId, callback) {
+        py.call("youfish.sponsor_segments", [videoId], function(res) {
+            callback(res && res.ok ? (res.segments || []) : [])
         })
     }
     // Disliked videoIds (updated by rate_song); loaded at startup and after each rating.
@@ -369,6 +410,27 @@ Item {
     function setBoostGain(gain) {
         py.call("youfish.set_setting", ["boost_gain", gain], function(s) {
             if (s) backend.boostGain = s.boost_gain || 1.0
+        })
+    }
+
+    // Volume normalization: even out loudness between tracks using YouTube's per-track loudnessDb
+    // (fetched at playtime, applied as a gain by the C++ player). Persist + mirror.
+    function setNormalizeVolume(on) {
+        py.call("youfish.set_setting", ["normalize_volume", !!on], function(s) {
+            if (s) backend.normalizeVolume = !!s.normalize_volume
+        })
+    }
+    // A track's loudnessDb from InnerTube /player (null when the field is absent). Called per track
+    // by the player when normalization is on; callback(dbOrNull).
+    function trackLoudness(videoId, callback) {
+        py.call("ytm.player_loudness", [videoId], function(res) {
+            callback(res && res.ok ? res.loudness_db : null)
+        })
+    }
+    // Persist + mirror the "max boost" knob (dB). 0 = attenuate-only, 12 = full two-way.
+    function setNormMaxBoostDb(db) {
+        py.call("youfish.set_setting", ["norm_max_boost_db", db], function(s) {
+            if (s && s.norm_max_boost_db !== undefined) backend.normMaxBoostDb = s.norm_max_boost_db
         })
     }
 
@@ -398,6 +460,13 @@ Item {
                  { subtitle: track.subtitle || "", thumb: track.thumb || "",
                    artistId: track.artistId || "" }],
                 function() {})
+    }
+    // Batch "Download all" for a playlist/album. The engine skips already-downloaded/duplicate
+    // tracks and returns {queued:[videoId,...], skipped:n}; downloads run serially + paced there.
+    function downloadPlaylist(tracks, callback) {
+        py.call("youfish.download_many", [tracks || []], function(res) {
+            if (callback) callback(res || { queued: [], skipped: 0 })
+        })
     }
     function loadDownloads() {
         py.call("youfish.list_downloads", [], function(list) { backend.downloads = list || [] })

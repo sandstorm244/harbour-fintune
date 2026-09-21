@@ -151,6 +151,41 @@ Page {
             }
 
             TextSwitch {
+                text: "Normalize volume"
+                description: "Even out loudness between tracks using YouTube's own per-song levels, "
+                             + "so you don't reach for the volume between songs. Fetched as each "
+                             + "track starts; songs without level data play unchanged."
+                automaticCheck: false
+                checked: app.backend.normalizeVolume
+                onClicked: app.backend.setNormalizeVolume(!app.backend.normalizeVolume)
+            }
+            Slider {
+                id: normBoostSlider
+                visible: app.backend.normalizeVolume
+                width: parent.width
+                minimumValue: 0
+                maximumValue: 12
+                stepSize: 1
+                value: Math.round(app.backend.normMaxBoostDb)
+                label: "Max boost for quiet tracks"
+                valueText: value <= 0 ? "Off — only turn loud tracks down" : "+" + value + " dB"
+                onReleased: {
+                    app.backend.setNormMaxBoostDb(value)
+                    value = Qt.binding(function() { return Math.round(app.backend.normMaxBoostDb) })
+                }
+            }
+            Label {
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * Theme.horizontalPageMargin
+                visible: app.backend.normalizeVolume
+                wrapMode: Text.Wrap
+                text: "How far a quiet song may be turned up to reach the common level. Loud songs "
+                      + "are always turned down regardless. 0 dB matches YouTube (never boosts)."
+                color: Theme.secondaryColor
+                font.pixelSize: Theme.fontSizeExtraSmall
+            }
+
+            TextSwitch {
                 text: "Autoplay"
                 description: "When the queue ends, keep playing related songs (radio). "
                              + "Turn off to stop at the end of the queue."

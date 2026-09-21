@@ -1258,6 +1258,89 @@ class DownloadAudioMeta(unittest.TestCase):
         self.assertFalse(os.path.exists(path))
 
 
+class DownloadQueueBatch(unittest.TestCase):
+    """download_many(): the playlist 'Download all' batch. Skips already-downloaded + duplicate +
+    id-less items, reports the queued id list, and every job runs serially through the one shared
+    worker (never a burst of parallel yt-dlp processes)."""
+    def setUp(self):
+        self._saved = {}
+        for name in ("_ytdlp_path", "_write_cookies_temp", "_ensure_pot_server",
+                     "_yt_extractor_args", "_pot_ytdlp_args", "_downloads_dir",
+                     "_downloads_path", "_set_pdeathsig"):
+            self._saved[name] = getattr(youfish, name)
+        self._popen = youfish.subprocess.Popen
+        self._prev_po = sys.modules.get("pyotherside")
+        self._gap = youfish._DL_GAP
+        youfish._DL_GAP = (0, 0)                       # no real sleeping in tests
+
+        self._tmp = tempfile.mkdtemp(prefix="dlq-")
+        youfish._ytdlp_path = lambda: "/fake/yt-dlp"
+        youfish._write_cookies_temp = lambda: ""
+        youfish._ensure_pot_server = lambda **kw: True
+        youfish._yt_extractor_args = lambda client_override=None, want_pot=False: []
+        youfish._pot_ytdlp_args = lambda: []
+        youfish._downloads_dir = lambda: self._tmp
+        youfish._downloads_path = lambda: os.path.join(self._tmp, "downloads.json")
+        youfish._set_pdeathsig = lambda: None
+
+        self.done_ids = []
+        self.cond = threading.Condition()
+        po = types.ModuleType("pyotherside")
+        def send(*args):
+            if args and args[0] == "download_done":
+                with self.cond:
+                    self.done_ids.append((args[1], args[3]))   # (videoId, ok)
+                    self.cond.notify_all()
+        po.send = send
+        sys.modules["pyotherside"] = po
+
+        class FakeProc:
+            def __init__(self, cmd, **kw):
+                o = cmd[cmd.index("-o") + 1]           # base + ".%(ext)s"
+                open(o.replace("%(ext)s", "m4a"), "w").close()   # the file yt-dlp would write
+                self.stdout = iter(["[download] 100.0% of 1MiB\n"])
+                self.returncode = 0
+            def wait(self):
+                return 0
+        youfish.subprocess.Popen = FakeProc
+
+    def tearDown(self):
+        for name, fn in self._saved.items():
+            setattr(youfish, name, fn)
+        youfish.subprocess.Popen = self._popen
+        youfish._DL_GAP = self._gap
+        if self._prev_po is not None:
+            sys.modules["pyotherside"] = self._prev_po
+        else:
+            sys.modules.pop("pyotherside", None)
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _wait_for(self, n, timeout=5):
+        end = time.time() + timeout
+        with self.cond:
+            while len(self.done_ids) < n and time.time() < end:
+                self.cond.wait(max(0, end - time.time()))
+            return len(self.done_ids)
+
+    def test_batch_queues_new_skips_dupes_and_downloaded(self):
+        items = [{"videoId": "a", "title": "A", "subtitle": "AA"},
+                 {"videoId": "b", "title": "B"},
+                 {"videoId": "a", "title": "A dup"},   # duplicate id within the batch → skipped
+                 {"title": "no id"}]                    # id-less → skipped
+        res = youfish.download_many(items)
+        self.assertEqual(res["queued"], ["a", "b"])
+        self.assertEqual(res["skipped"], 2)
+        self.assertEqual(self._wait_for(2), 2)         # both ran serially through the worker
+        self.assertEqual({vid for vid, ok in self.done_ids if ok}, {"a", "b"})
+        self.assertEqual({d["id"] for d in youfish.list_downloads()}, {"a", "b"})
+        # a second batch skips the now-already-downloaded 'a'
+        res2 = youfish.download_many([{"videoId": "a", "title": "A"},
+                                      {"videoId": "c", "title": "C"}])
+        self.assertEqual(res2["queued"], ["c"])
+        self.assertEqual(res2["skipped"], 1)
+        self.assertEqual(self._wait_for(3), 3)         # drain 'c' before teardown restores mocks
+
+
 class YtmIdentity(unittest.TestCase):
     """The self-healing InnerTube identity (ytm.py): scrape the live client version/key from the
     ytcfg blob, fall back to the shipped defaults when the cache is cold. Guards the scrape regex —
@@ -1449,6 +1532,125 @@ class PotEnsureBudget(unittest.TestCase):
         finally:
             youfish._pot_lock.release()
             youfish._pot_active, youfish._pot_ready_on_port = saved
+
+
+# --- SponsorBlock segment fetch + offline cache --------------------------------------------- #
+
+class _SBResp:
+    """Context-manager urlopen stand-in whose .read() returns the whole body (no-arg, like a real
+    HTTP response), matching how sponsor_segments consumes it."""
+    def __init__(self, data):
+        self._data = data
+    def read(self):
+        return self._data
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+
+
+class SponsorBlockSegments(unittest.TestCase):
+    """sponsor_segments(): parse + sort the API's segments, treat 404 as 'nothing submitted', and
+    fall back to segments cached on a downloaded copy on any other failure (offline skip)."""
+
+    def setUp(self):
+        self._urlopen = youfish.urllib.request.urlopen
+        self._ipv4 = youfish._force_ipv4
+        self._list = youfish.list_downloads
+        youfish._force_ipv4 = lambda: None                # don't touch the test process's resolver
+
+    def tearDown(self):
+        youfish.urllib.request.urlopen = self._urlopen
+        youfish._force_ipv4 = self._ipv4
+        youfish.list_downloads = self._list
+
+    def test_parses_and_sorts_api_segments(self):
+        payload = json.dumps([
+            {"category": "sponsor", "segment": [30.0, 45.5]},
+            {"category": "intro",   "segment": [0.0, 5.0]},
+            {"category": "zero",    "segment": [10.0, 10.0]},   # zero-length → dropped
+            {"category": "broken",  "segment": [1.0]},          # malformed → dropped
+        ]).encode()
+        youfish.urllib.request.urlopen = lambda req, timeout=None: _SBResp(payload)
+        res = youfish.sponsor_segments("vid123")
+        self.assertTrue(res["ok"])
+        self.assertEqual([s["category"] for s in res["segments"]], ["intro", "sponsor"])  # by start
+        self.assertEqual(res["segments"][1]["start"], 30.0)
+        self.assertEqual(res["segments"][1]["end"], 45.5)
+
+    def test_404_is_empty_not_cache(self):
+        def boom(req, timeout=None):
+            raise youfish.urllib.error.HTTPError(req.full_url, 404, "none", {}, None)
+        youfish.urllib.request.urlopen = boom
+        youfish.list_downloads = lambda: [                # a cache exists, but 404 must ignore it
+            {"id": "vid123", "sb_segments": [{"start": 1, "end": 2, "category": "sponsor"}]}]
+        res = youfish.sponsor_segments("vid123")
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["segments"], [])             # 404 = definitively nothing submitted
+
+    def test_network_error_falls_back_to_cache(self):
+        def boom(req, timeout=None):
+            raise youfish.urllib.error.URLError("offline")
+        youfish.urllib.request.urlopen = boom
+        youfish.list_downloads = lambda: [
+            {"id": "other",  "sb_segments": [{"start": 0, "end": 1, "category": "intro"}]},
+            {"id": "vid123", "sb_segments": [{"start": 5, "end": 9, "category": "sponsor"}]}]
+        res = youfish.sponsor_segments("vid123")
+        self.assertTrue(res["ok"])
+        self.assertTrue(res.get("cached"))
+        self.assertEqual(res["segments"][0]["category"], "sponsor")
+
+    def test_cache_miss_when_not_downloaded(self):
+        youfish.list_downloads = lambda: []
+        self.assertEqual(youfish._cached_sb_segments("vid123"), {"ok": False, "segments": []})
+
+
+# --- Loudness normalization: /player loudnessDb extraction --------------------------------- #
+
+class PlayerLoudness(unittest.TestCase):
+    """ytm.player_loudness(): pull playerConfig.audioConfig.loudnessDb out of an InnerTube /player
+    response for playtime volume normalization. Absent field / a bad request → None (the caller
+    then leaves the gain at unity), a present value → the float."""
+
+    def setUp(self):
+        import ytm
+        self.ytm = ytm
+        self._inner = ytm._innertube
+
+    def tearDown(self):
+        self.ytm._innertube = self._inner
+
+    def test_reads_loudness_db(self):
+        self.ytm._innertube = lambda ep, body, **k: {
+            "playerConfig": {"audioConfig": {"loudnessDb": 7.5, "perceptualLoudnessDb": -12.3}}}
+        res = self.ytm.player_loudness("vid123")
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["loudness_db"], 7.5)
+
+    def test_absent_field_is_none(self):
+        self.ytm._innertube = lambda ep, body, **k: {"playabilityStatus": {"status": "OK"}}
+        res = self.ytm.player_loudness("vid123")
+        self.assertTrue(res["ok"])
+        self.assertIsNone(res["loudness_db"])
+
+    def test_request_failure_reports_not_ok(self):
+        def boom(ep, body, **k):
+            raise RuntimeError("bot-walled")
+        self.ytm._innertube = boom
+        res = self.ytm.player_loudness("vid123")
+        self.assertFalse(res["ok"])
+        self.assertIsNone(res["loudness_db"])
+
+    def test_empty_video_id_short_circuits(self):
+        called = {"n": 0}
+        def counting(ep, body, **k):
+            called["n"] += 1
+            return {}
+        self.ytm._innertube = counting
+        res = self.ytm.player_loudness("")
+        self.assertTrue(res["ok"])
+        self.assertIsNone(res["loudness_db"])
+        self.assertEqual(called["n"], 0)            # no network call for an empty id
 
 
 if __name__ == "__main__":

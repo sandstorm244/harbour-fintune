@@ -1567,6 +1567,32 @@ def get_radio(video_id, limit=25):
     return {"tracks": tracks}
 
 
+def player_loudness(video_id):
+    """Per-track loudness for volume normalization, read from InnerTube /player:
+    playerConfig.audioConfig.loudnessDb — dB relative to YouTube's normalization target (positive
+    = the track is louder than the target, so it should be attenuated; negative = quieter, boosted).
+    This is YouTube's own "stable volume" figure; yt-dlp does not expose it, so we fetch it here
+    through the real WEB_REMIX InnerTube path (proper context/visitor/cookies), which returns the
+    playerConfig even when the streaming URLs are gated. Returns {ok, loudness_db} with loudness_db
+    a float, or None when the field is absent (older uploads, or a response without audioConfig) —
+    the caller then leaves the playback gain at unity (no normalization for that track)."""
+    if not video_id:
+        return {"ok": True, "loudness_db": None}
+    body = {"videoId": video_id, "contentCheckOk": True, "racyCheckOk": True}
+    try:
+        data = _innertube("player", body)
+    except Exception as ex:
+        _log("player_loudness %s failed: %s" % (video_id, ex))
+        return {"ok": False, "loudness_db": None}
+    db = _nav(data, ["playerConfig", "audioConfig", "loudnessDb"], None)
+    try:
+        db = float(db) if db is not None else None
+    except (TypeError, ValueError):
+        db = None
+    _log("player_loudness %s: %s dB" % (video_id, db))
+    return {"ok": True, "loudness_db": db}
+
+
 # --------------------------------------------------------------------------- #
 # Lyrics (LRCLIB — free, no auth). Synced (LRC) when available, else plain text.
 # --------------------------------------------------------------------------- #

@@ -41,6 +41,8 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import queue
+import random
 import threading
 import time
 import urllib.error
@@ -3194,10 +3196,26 @@ _SETTINGS_DEFAULTS = {"player_client": "",
                       # Volume boost (linear gain, 1.0 = none) above system max; a soft limiter in
                       # the player keeps the extra gain from hard-clipping. For quiet BT output.
                       "boost_gain": 1.0,
+                      # normalize_volume: even out per-track loudness using YouTube's loudnessDb
+                      # (fetched at playtime via ytm.player_loudness, applied as a gain by the
+                      # C++ player). Off by default; NOT a resolve-output key.
+                      "normalize_volume": False,
+                      # norm_max_boost_db: ceiling (dB) on how much normalization may BOOST a
+                      # quiet track. 0 = only ever turn loud tracks DOWN (YouTube's own behavior);
+                      # 12 = full two-way normalization. Attenuation of loud tracks is never capped
+                      # by this. Client-side gain knob, NOT a resolve-output key.
+                      "norm_max_boost_db": 12.0,
                       # autoplay: when the queue ends, keep playing related songs (radio).
                       # skip_disliked: auto-skip songs you've disliked during autoplay.
                       "autoplay": True,
                       "skip_disliked": False,
+                      # SponsorBlock: skip community-marked segments (fetched from sponsor.ajay.app).
+                      # Master switch + a per-category action: "skip" (auto-skip), "manual" (show a
+                      # tap-to-skip button), or absent/"off" (ignore). Applied client-side by the
+                      # player (see harbour-fintune.qml), so it is NOT a resolve-output key.
+                      "sponsorblock": True,
+                      "sponsorblock_actions": {"sponsor": "skip", "selfpromo": "skip",
+                                               "interaction": "skip"},
                       # download_dir: where downloaded tracks are written. "" = the app's own
                       # downloads folder (default); a picked folder (e.g. ~/Music, an SD card)
                       # overrides it, validated writable before use (see _downloads_dir).
@@ -3389,10 +3407,122 @@ def _save_downloads(lst):
         pass
 
 
+# SponsorBlock categories we ASK the API for. What actually happens to each segment (auto-skip,
+# show a manual skip button, or ignore) is a per-category CLIENT setting (`sponsorblock_actions`,
+# applied by the player) — so we fetch the whole skippable set here and let the UI decide. Widening
+# this list only changes what's *available* to configure; unconfigured categories default to off.
+_SB_CATEGORIES = ('["sponsor","selfpromo","interaction","intro","outro","preview",'
+                  '"filler","music_offtopic"]')
+
+
+def _cached_sb_segments(video_id):
+    """Offline fallback: SponsorBlock segments stashed on a download entry at download time (see
+    download()). Lets a downloaded track still skip segments with no network. Absent/empty →
+    {"ok": False} so a live fetch is preferred when online."""
+    if not video_id:
+        return {"ok": False, "segments": []}
+    for d in list_downloads():
+        if d.get("id") == video_id and d.get("sb_segments"):
+            return {"ok": True, "segments": d["sb_segments"], "cached": True}
+    return {"ok": False, "segments": []}
+
+
+def sponsor_segments(video_id):
+    """SponsorBlock skip segments for a video: [{start, end, category}] in seconds. Uses the
+    public sponsor.ajay.app API; 404 just means nobody's submitted any. On a network failure,
+    falls back to segments cached on a downloaded copy (so offline playback still skips)."""
+    if not video_id:
+        return {"ok": True, "segments": []}
+    _force_ipv4()
+    url = ("https://sponsor.ajay.app/api/skipSegments?videoID=%s&categories=%s"
+           % (urllib.parse.quote(video_id), urllib.parse.quote(_SB_CATEGORIES)))
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "harbour-fintune"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as ex:
+        # 404 = definitively nothing submitted (not an error); anything else → try the cache.
+        return {"ok": True, "segments": []} if ex.code == 404 else _cached_sb_segments(video_id)
+    except Exception:
+        return _cached_sb_segments(video_id)
+    segs = []
+    for s in data if isinstance(data, list) else []:
+        seg = s.get("segment") or []
+        if len(seg) == 2 and seg[1] > seg[0]:
+            segs.append({"start": float(seg[0]), "end": float(seg[1]),
+                         "category": s.get("category", "")})
+    segs.sort(key=lambda x: x["start"])
+    return {"ok": True, "segments": segs}
+
+
+# --- Serial download queue -------------------------------------------------------------------- #
+# Every download (a single tap or a playlist "download all") funnels through ONE worker thread,
+# one yt-dlp at a time, with a small randomized gap between consecutive tracks. Serial + paced =
+# no burst of parallel googlevideo requests, which is what trips YouTube's rate-limiting / bot wall
+# on a big batch. yt-dlp already makes each individual download robust (default retries, throttle
+# detection); this adds the cross-item pacing it does NOT do by default.
+_dl_queue = queue.Queue()
+_dl_worker_lock = threading.Lock()
+_dl_worker_started = False
+_DL_GAP = (1.0, 3.0)   # randomized gap (s) between consecutive downloads (fast-but-paced)
+
+
+def _ensure_dl_worker():
+    global _dl_worker_started
+    with _dl_worker_lock:
+        if _dl_worker_started:
+            return
+        _dl_worker_started = True
+        threading.Thread(target=_dl_worker, daemon=True).start()
+
+
+def _dl_worker():
+    while True:
+        job = _dl_queue.get()
+        try:
+            _run_download(job["video_id"], job["title"], job["kind"], job.get("meta"))
+        except Exception:
+            pass
+        finally:
+            _dl_queue.task_done()
+        # Pace only within a burst: sleep before the next queued item, never after a lone download.
+        if not _dl_queue.empty():
+            time.sleep(random.uniform(*_DL_GAP))
+
+
 def download(video_id, title, kind="audio", meta=None):
-    """Kick off a background audio download (itag 140 → a single .m4a, no ffmpeg). `kind` is
-    kept for the QML call/entry shape (delete_download matches on it) but is always "audio" —
-    the music app downloads nothing else.
+    """Queue a single offline audio download. Returns at once; the serial worker does the work and
+    emits download_progress / download_done (see _run_download)."""
+    _ensure_dl_worker()
+    _dl_queue.put({"video_id": video_id, "title": title, "kind": "audio", "meta": meta})
+    return {"ok": True, "queued": _dl_queue.qsize()}
+
+
+def download_many(items):
+    """Queue a batch — a playlist/album "Download all". items = [{videoId,title,subtitle,thumb,
+    artistId}, ...]; already-downloaded and duplicate ids are skipped. Returns
+    {ok, queued: [videoId, ...], skipped: n}. The serial worker + inter-track pacing are the
+    rate-limit safety, so a big playlist can't burst-hammer googlevideo."""
+    kind = "audio"
+    have = set(d.get("id") for d in list_downloads() if d.get("kind") == kind)
+    _ensure_dl_worker()
+    queued = []
+    for it in (items or []):
+        vid = it.get("videoId") or it.get("id")
+        if not vid or vid in have:
+            continue
+        have.add(vid)
+        meta = dict((k, it.get(k)) for k in ("subtitle", "thumb", "artistId") if it.get(k))
+        _dl_queue.put({"video_id": vid, "title": it.get("title") or vid,
+                       "kind": kind, "meta": meta})
+        queued.append(vid)
+    return {"ok": True, "queued": queued, "skipped": len(items or []) - len(queued)}
+
+
+def _run_download(video_id, title, kind, meta):
+    """Perform ONE audio download synchronously (itag 140 → a single .m4a, no ffmpeg). Called only
+    by the serial _dl_worker, so it never runs concurrently with another download. `kind` is kept
+    for the entry shape (delete_download matches on it) but is always "audio".
 
     `meta` (optional dict) is stored alongside the entry so a downloaded track keeps its
     artist (`subtitle`), cover (`thumb`) and artist channel (`artistId`) for the Downloads
@@ -3403,7 +3533,7 @@ def download(video_id, title, kind="audio", meta=None):
     binp = _ytdlp_path()
     if not binp:
         pyotherside.send("download_done", video_id, kind, False, "yt-dlp not found")
-        return {"ok": False}
+        return
     # Sanitise the id before it reaches the -o output template and the URL: strip anything
     # outside [\w-] so a crafted id can't traverse out of downloads/ (../) or inject a yt-dlp
     # output-template field (%(...)s). Real YouTube ids are 11 chars of [\w-], so this is a
@@ -3456,6 +3586,26 @@ def download(video_id, title, kind="audio", meta=None):
                     for k in ("subtitle", "thumb", "artistId"):
                         if meta.get(k):
                             entry[k] = meta[k]
+                if get_settings().get("sponsorblock", True):
+                    # Cache SponsorBlock segments on the entry so a downloaded track still skips
+                    # offline (best-effort — an empty/failed fetch just leaves them absent). We're
+                    # already on the background download thread, so this extra round-trip is free.
+                    try:
+                        sb = sponsor_segments(video_id)
+                        if sb.get("ok") and sb.get("segments"):
+                            entry["sb_segments"] = sb["segments"]
+                    except Exception:
+                        pass
+                if get_settings().get("normalize_volume", False):
+                    # Cache the loudnessDb too so a downloaded track normalizes offline. Same
+                    # best-effort deal: absent field / failed fetch just leaves it off the entry.
+                    try:
+                        import ytm
+                        pl = ytm.player_loudness(video_id)
+                        if pl.get("ok") and pl.get("loudness_db") is not None:
+                            entry["loudness_db"] = pl["loudness_db"]
+                    except Exception:
+                        pass
                 lst.insert(0, entry)
                 _save_downloads(lst)
                 pyotherside.send("download_done", video_id, kind, True, "")
@@ -3472,8 +3622,7 @@ def download(video_id, title, kind="audio", meta=None):
                 except Exception:
                     pass
 
-    threading.Thread(target=run, daemon=True).start()
-    return {"ok": True}
+    run()   # synchronous: the serial _dl_worker is the one-at-a-time thread
 
 
 def delete_download(video_id, kind):

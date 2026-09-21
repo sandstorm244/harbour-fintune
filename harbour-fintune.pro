@@ -49,6 +49,7 @@ DISTFILES += \
     qml/pages/ProvidersPage.qml \
     qml/pages/LyricsPage.qml \
     qml/pages/EqualizerPage.qml \
+    qml/pages/SponsorBlockPage.qml \
     qml/pages/PlaylistPickerPage.qml \
     qml/pages/HistoryPage.qml \
     qml/pages/SettingsPage.qml \

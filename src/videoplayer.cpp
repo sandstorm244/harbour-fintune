@@ -204,6 +204,18 @@ void VideoPlayer::setBoost(double gain)
         g_object_set(m_boost, "volume", (gdouble)m_boostGain, nullptr);
 }
 
+void VideoPlayer::setNormGain(double gain)
+{
+    // Clamp to a sane window: normalization mostly attenuates loud masters (gain < 1), but can
+    // also lift quiet ones a little. The floor/ceiling stop a bogus loudnessDb from muting or
+    // blowing out a track; the limiter after the boost still catches any residual peak.
+    if (gain < 0.1)  gain = 0.1;      // -20 dB floor
+    if (gain > 4.0)  gain = 4.0;      // +12 dB ceiling
+    m_normGain = gain;
+    if (m_norm)
+        g_object_set(m_norm, "volume", (gdouble)m_normGain, nullptr);
+}
+
 void VideoPlayer::stop()
 {
     teardown();
@@ -529,6 +541,15 @@ void VideoPlayer::buildPipeline()
         }
     }
 
+    // Per-track loudness normalization: a plain volume element driven by setNormGain (derived from
+    // YouTube's loudnessDb). Sits before the boost + limiter so the limiter tames the combined
+    // peak; neutral at 1.0 so it's harmless when normalization is off or a track has no data.
+    m_norm = gst_element_factory_make("volume", "norm");
+    if (m_norm) {
+        chainAdd(m_norm);
+        g_object_set(m_norm, "volume", (gdouble)m_normGain, nullptr);
+    }
+
     // Volume boost + soft limiter. audioconvert normalises the format for the limiter; volume
     // applies the boost; rglimiter (optional) soft-limits the boosted peaks so exceeding the
     // system max doesn't hard-clip. Without the limiter plugin, boost still works but can clip
@@ -592,7 +613,7 @@ void VideoPlayer::teardown()
     // m_videoInput/m_videoSink point at elements already in this list, so they're intentionally
     // excluded to avoid a double-unref. Done BEFORE the pipeline unref, while parents are intact.
     GstElement *owned[] = { m_videoBin, m_audioBin, m_scaletempo, m_pulsesink,
-                            m_videoConvert, m_appsink, m_hwDec };
+                            m_videoConvert, m_appsink, m_hwDec, m_norm };
     for (GstElement *e : owned) {
         if (e && !GST_OBJECT_PARENT(e))
             gst_object_unref(e);
@@ -616,6 +637,7 @@ void VideoPlayer::teardown()
     m_appsink = m_scaletempo = m_pulsesink = nullptr;
     m_equalizer = m_eqConvIn = m_eqConvOut = nullptr;
     m_dynConv = m_boost = m_limiter = nullptr;
+    m_norm = nullptr;
     m_videoInput = m_videoSink = m_hwDec = nullptr;
     m_videoActive = true;
     m_muxed = false;
