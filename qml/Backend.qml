@@ -11,6 +11,7 @@ Item {
     property bool ready: false
     property bool pyReady: false         // youfish (engine) imported and callable
     property bool fastLaneReady: false   // pyFast (the playback lane) imported and callable
+    property bool trackLaneReady: false  // pyTrack (per-track-start small calls) imported and callable
     property bool ytmReady: false        // ytm (YouTube Music metadata) imported and callable
     property string ytdlpVersion: ""
     property bool updating: false
@@ -120,7 +121,9 @@ Item {
     // Free the proxy's download streams for a track we've moved away from (skip/advance). The
     // idle reaper would get there anyway; this just stops the bandwidth immediately.
     function releasePlayback(videoId) {
-        if (videoId) py.call("youfish.release_playback", [videoId], function() {})
+        if (!videoId) return
+        var lane = backend.trackLaneReady ? pyTrack : py     // per-track-start call: own lane
+        lane.call("youfish.release_playback", [videoId], function() {})
     }
 
     // Song radio (autoplay continuation) for a videoId → caller callback.
@@ -203,7 +206,8 @@ Item {
     // --- Play history (recently-played tracks) ---
     function musicRecordPlay(track) {
         if (!track || !track.videoId) return
-        py.call("ytm.record_play", [track.videoId, track.title || "", track.subtitle || "",
+        var lane = backend.trackLaneReady ? pyTrack : py     // per-track-start call: own lane
+        lane.call("ytm.record_play", [track.videoId, track.title || "", track.subtitle || "",
                                      track.thumb || "", track.artistId || ""], function() {})
     }
     function musicHistory(callback) {
@@ -216,7 +220,7 @@ Item {
     // Tracks of a playlist / album / mix page → the caller's callback (page-scoped). `params`
     // (optional) targets an artist "Show all songs" endpoint.
     function musicPlaylist(browseId, params, callback) {
-        py.call("ytm.get_playlist", [browseId, 200, params || ""],
+        py.call("ytm.get_playlist", [browseId, 2000, params || ""],
                 function(res) { callback(res || {}) })
     }
 
@@ -386,7 +390,8 @@ Item {
     // SponsorBlock segments for a track → caller callback ([{start,end,category}], seconds). Falls
     // back to segments cached on the downloaded copy when offline (handled Python-side).
     function sponsorSegments(videoId, callback) {
-        py.call("youfish.sponsor_segments", [videoId], function(res) {
+        var lane = backend.trackLaneReady ? pyTrack : py     // per-track-start call: own lane
+        lane.call("youfish.sponsor_segments", [videoId], function(res) {
             callback(res && res.ok ? (res.segments || []) : [])
         })
     }
@@ -423,7 +428,8 @@ Item {
     // A track's loudnessDb from InnerTube /player (null when the field is absent). Called per track
     // by the player when normalization is on; callback(dbOrNull).
     function trackLoudness(videoId, callback) {
-        py.call("ytm.player_loudness", [videoId], function(res) {
+        var lane = backend.trackLaneReady ? pyTrack : py     // per-track-start call: own lane
+        lane.call("ytm.player_loudness", [videoId], function(res) {
             callback(res && res.ok ? res.loudness_db : null)
         })
     }
@@ -638,13 +644,15 @@ Item {
             addImportPath(Qt.resolvedUrl("../python").toString().replace("file://", ""))
             importModule("youfish", function() {
                 backend.pyReady = true
+                // First: it only starts background threads (visitor id, POT server, delayed zipapp
+                // import), so queued behind the loads below it would just start them later.
+                py.call("youfish.prewarm", [], function() {})
                 backend.recheck()
                 backend.loadSettings()
                 backend.loadDownloads()
                 backend.loadDownloadLocation()
                 backend.loadPotStatus()
                 backend.loadFastResolveStatus()
-                py.call("youfish.prewarm", [], function() {})  // POT server + warm zipapp import
             })
             // The YouTube Music metadata layer (separate module, same worker).
             importModule("ytm", function() {
@@ -737,5 +745,22 @@ Item {
             importModule("youfish", function() { backend.fastLaneReady = true })
         }
         onError: console.log("python error (fast lane): " + traceback)
+    }
+
+    // The per-track lane: the small calls every track start makes (player_loudness, the play
+    // recording, release of the previous track's streams, SponsorBlock segments). pyFast is no
+    // good for them — a yt-dlp-fallback resolve can occupy it for many seconds — and py is worse
+    // (home/library loads). Each is a quick request/JSON-write, so one more worker thread is
+    // plenty. Declared after py/pyFast for the same pyotherside.send reason as pyFast. Needs
+    // both modules: youfish for the engine calls, ytm for loudness + history.
+    Python {
+        id: pyTrack
+        Component.onCompleted: {
+            addImportPath(Qt.resolvedUrl("../python").toString().replace("file://", ""))
+            importModule("youfish", function() {
+                importModule("ytm", function() { backend.trackLaneReady = true })
+            })
+        }
+        onError: console.log("python error (track lane): " + traceback)
     }
 }

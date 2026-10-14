@@ -16,10 +16,10 @@ on-disk download job.
 PO tokens (2026 reality): YouTube increasingly binds a Proof-of-Origin token to the
 stream URLs — without one many clients return nothing fetchable. The bgutil
 provider (OPT-IN, user-installed; see install_pot_provider) mints them on a
-sandboxed Deno sidecar. The common path avoids the mint entirely: resolve()'s
-primary dump is the TOKEN-FREE tv_embedded client, run anonymously; the token
-machinery is only the safety net for gated/restricted videos (see
-_resolve_uncached / _default_client).
+sandboxed Deno sidecar. The common path avoids the mint entirely: resolve() asks
+the InnerTube fast path first and its yt-dlp fallback's primary dump is the TOKEN-FREE
+JS-less client (_token_free_client), run anonymously; the token machinery is only
+the safety net for gated/restricted videos (see _resolve_uncached / _default_client).
 """
 
 import atexit
@@ -138,11 +138,11 @@ _CANDIDATE_PATHS = (
 
 def _is_manifest(f):
     """1 if this is an HLS/manifest variant (m3u8) rather than a direct progressive/DASH URL, else 0.
-    tv_embedded exposes BOTH at every resolution; the direct URL is preferred as a pure tiebreaker —
+    Some clients expose BOTH at every resolution; the direct URL is preferred as a pure tiebreaker —
     it needs no manifest round-trip before media (faster preroll) and rides the app's proven
     range-seekable proxy path (proxying a manifest is the fragile case the proxy code warns about).
     Without this the manifest variant can win the pick purely by list order (measured 2026-09-06:
-    anonymous tv_embedded picked manifest v=617 over the direct equivalent)."""
+    the anonymous token-free primary picked manifest v=617 over the direct equivalent)."""
     return 1 if ("m3u8" in (f.get("protocol") or "").lower()
                  or "manifest.googlevideo" in (f.get("url") or "")) else 0
 
@@ -372,17 +372,19 @@ def _spawn_tax_probe():
     if not path:
         _tlog("spawn_tax: yt-dlp not found")
         return
-    best = None
+    best, ver = None, "?"
     for _ in range(3):                       # min of a few runs → the warm-FS best case, the fair floor
         _t0 = time.time()
         try:
-            subprocess.run([path, "--version"], capture_output=True, text=True, timeout=30)
+            ver = (subprocess.run([path, "--version"], capture_output=True, text=True,
+                                  timeout=30).stdout or "?").strip()
         except Exception as ex:
             _tlog("spawn_tax: probe failed (%s)" % ex)
             return
         dt = time.time() - _t0
         best = dt if best is None else min(best, dt)
-    _tlog("spawn_tax %.2fs  (min of 3x `yt-dlp --version`; ~pure process launch)" % best)
+    _tlog("spawn_tax %.2fs  (min of 3x `yt-dlp --version`; ~pure process launch) — yt-dlp %s"
+          % (best, ver))
 
 
 def _clen(url):
@@ -414,7 +416,7 @@ def _proxy_url_ok(url):
 
 
 def _probe_url_ok(url, ua, timeout=3):
-    """Fast pre-flight for the token-free→token fallback (today: tv_embedded→mweb): does this
+    """Fast pre-flight for the token-free→token fallback (token-free primary → mweb): does this
     googlevideo URL actually SERVE bytes, or 403 at byte 0? A gated token-free stream looks fine
     at resolve but 403s the instant the player fetches it, so resolve probes one chosen URL and,
     on a real 403, re-extracts with the token client BEFORE playback. Returns False ONLY on a definite HTTP 403 (the escalation trigger);
@@ -490,6 +492,18 @@ def _reap_proc(proc):
         pass
 
 
+def _gv_request(url, ua, start, end):
+    """A googlevideo Range GET with the proven 6-header set (see _spawn) and the format's own UA."""
+    return urllib.request.Request(url, headers={
+        "User-Agent": ua or _BROWSER_UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-us,en;q=0.5",
+        "Sec-Fetch-Mode": "navigate",
+        "Accept-Encoding": "identity",
+        "Range": "bytes=%d-%d" % (start, end),
+    })
+
+
 class _DirectFetch:
     """In-process googlevideo streamer — a duck-typed stand-in for the yt-dlp child (_spawn):
     same `.stdout.read(n)` / `.kill()` / `.poll()` / `.wait()` surface, so _reader and the reap
@@ -519,21 +533,14 @@ class _DirectFetch:
         self.chunk_end = -1          # last offset of the open bounded chunk; None = open-ended 200
         self.reopens = 0             # consecutive ZERO-PROGRESS reopens (truncation guard)
         self.returncode = None       # duck: None while live, 0 clean EOF / killed, 1 error death
+        self.err = ""                # why it died ("HTTP 403", "timeout", ...) — for the debug log
         self.stdout = self           # _reader drains proc.stdout.read(n)
 
     def _open_next(self):
         end = self.pos + _DIRECT_CHUNK - 1
         if self.total is not None:
             end = min(end, self.total - 1)
-        req = urllib.request.Request(self.url, headers={
-            "User-Agent": self.ua or _BROWSER_UA,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-us,en;q=0.5",
-            "Sec-Fetch-Mode": "navigate",
-            "Accept-Encoding": "identity",
-            "Range": "bytes=%d-%d" % (self.pos, end),
-        })
-        resp = urllib.request.urlopen(req, timeout=30)
+        resp = urllib.request.urlopen(_gv_request(self.url, self.ua, self.pos, end), timeout=30)
         code = getattr(resp, "status", None) or resp.getcode()
         if code == 200:              # server ignored the Range: stream this one response to EOF
             self.chunk_end = None
@@ -556,9 +563,11 @@ class _DirectFetch:
                     self._open_next()
                 except urllib.error.HTTPError as ex:
                     self.returncode = 0 if ex.code == 416 else 1   # 416: past EOF (no-clen case)
+                    self.err = "HTTP %s" % ex.code
                     return b""
-                except Exception:
+                except Exception as ex:
                     self.returncode = 1                   # DNS / TLS / timeout / reset / ...
+                    self.err = repr(ex)[:120]
                     return b""
             try:
                 buf = self.resp.read(n)
@@ -728,6 +737,10 @@ def _reader(s, gen):
             with s.cond:
                 s.edge_ts = time.time()   # B4: recovery in progress — don't let the stall watchdog abort re-resolve
             _reap_proc(proc)                                 # off-lock reap of the exited child
+            if isinstance(proc, _DirectFetch) and _DEBUG:
+                _tlog("direct-fetch itag=%s died after %d bytes at=%d: %s [%s]"
+                      % (s.itag, nproc, s.dl_start, proc.err or "eof", _url_shape(s.url)))
+            refused = False
             if isinstance(proc, _DirectFetch) and nproc == 0:
                 # The direct fetch produced NOTHING (403/expired/blocked at byte 0). Flip this
                 # stream to the binary child before the resume respawn — the fallback doctrine:
@@ -735,6 +748,16 @@ def _reader(s, gen):
                 # also hand the next spawn a fresh URL; the child gets first go at it.)
                 s.use_binary = True
                 _plog("direct-fetch dead at byte 0 (itag=%s) -> binary child" % s.itag)
+                # An unexpired InnerTube-minted URL refused at byte 0 is evidence against the fast
+                # path itself on this network — enough of them and resolve goes back to yt-dlp.
+                # Only an HTTP answer counts: a network failure is no verdict on the URL. The
+                # recovery then skips the fast client, and the cached resolve that handed out
+                # this URL is dropped so a replay doesn't start from it again.
+                if proc.returncode == 1 and proc.err.startswith("HTTP ") \
+                        and _fast_client_url(s.url) and _expire_ts(s.url) > time.time() + 60:
+                    refused = True
+                    _fast_strike("itag %s refused at byte 0 (%s)" % (s.itag, proc.err))
+                    _drop_resolved(s.vid)
             if s.cursor > s.cursor_at_last_death:            # R9: credit REAL playback advance (cursor
                 tries = 0                                    #     survives a False resume's edge=0),
             s.cursor_at_last_death = s.cursor                #     cap only genuinely stuck streams
@@ -743,7 +766,7 @@ def _reader(s, gen):
                 with s.cond:
                     s.state = "FAIL"; s.cond.notify_all()
                 return
-            fresh = _reresolve(s.vid, s.itag, s.url)         # reuse the rate-limited 403 refresh
+            fresh = _reresolve(s.vid, s.itag, s.url, refused)  # reuse the rate-limited 403 refresh
             if fresh and _proxy_url_ok(fresh):
                 s.url = fresh
             with s.cond:
@@ -1203,7 +1226,7 @@ def _ytdlp_formats(video_id, anon=False):
         return {}
 
 
-def _reresolve(video_id, itag, failed_url):
+def _reresolve(video_id, itag, failed_url, refused=False):
     """Fresh direct URL for (video_id, itag), re-running yt-dlp at most once per stale
     generation. Concurrent video+audio 403s share one refresh: whoever takes the lock
     first re-extracts; the other sees a cached URL that differs from its failed one and
@@ -1216,12 +1239,16 @@ def _reresolve(video_id, itag, failed_url):
     gated-fallback whose shapes a token-free dump may not reproduce). Both dumps count
     against the spawn rate-limit; worst case this holds _url_cache_lock across two 90s
     dumps — acceptable for a rare recovery path where reliability beats latency.
+
+    `refused`: googlevideo refused the failed URL, an unexpired fast-path one, at byte 0. Asking
+    the same client again only hands back another URL it refuses (on device: three rounds, ~6s,
+    each probing fine), so this skips the fast client and any cached fast URL and goes to yt-dlp.
     """
     with _url_cache_lock:
         ent = _url_cache.get(video_id)
         if ent and time.time() - ent["ts"] < _URL_CACHE_TTL:
             cached = ent["fmts"].get(itag)
-            if cached and cached != failed_url:
+            if cached and cached != failed_url and not (refused and _fast_client_url(cached)):
                 return cached  # another track already refreshed this generation
         now = time.time()
         _reresolve_spawns[:] = [t for t in _reresolve_spawns if now - t < _RERESOLVE_WINDOW]
@@ -1229,7 +1256,14 @@ def _reresolve(video_id, itag, failed_url):
             _plog("reresolve rate-limited (%d in %.0fs)" % (len(_reresolve_spawns), _RERESOLVE_WINDOW))
             return None
         _reresolve_spawns.append(now)
-        fresh = _ytdlp_formats(video_id, anon=True)
+        # A stream the InnerTube fast path started: re-ask the same client first (one cheap POST,
+        # same itag naming + UA) before paying for a yt-dlp run.
+        fresh = _fast_formats_map(video_id) if _fast_client_url(failed_url) and not refused else {}
+        if fresh.get(itag) and not _fast_urls_ok([fresh[itag]], _it().player_client()[2]):
+            fresh = {}
+        src = "innertube" if fresh.get(itag) else (_default_client() or "auto")
+        if not fresh.get(itag):
+            fresh = _ytdlp_formats(video_id, anon=True)
         if not fresh.get(itag):
             if len(_reresolve_spawns) < _RERESOLVE_BURST:      # the fallback spawn pays the limit too
                 _reresolve_spawns.append(time.time())
@@ -1242,7 +1276,7 @@ def _reresolve(video_id, itag, failed_url):
             return None
         if _DEBUG:   # the WARM re-resolve's token + client for the exact itag that 403'd
             _tlog("reresolve itag=%s %s client=%s"
-                  % (itag, _pot_of(fresh.get(itag, "")), _default_client() or "auto"))
+                  % (itag, _pot_of(fresh.get(itag, "")), src))
         _url_cache[video_id] = {"ts": time.time(), "fmts": fresh}
         if len(_url_cache) > _URL_CACHE_MAX:  # evict oldest beyond the cap
             for k, _ in sorted(_url_cache.items(),
@@ -1250,6 +1284,219 @@ def _reresolve(video_id, itag, failed_url):
                 _url_cache.pop(k, None)
         return fresh.get(itag)
 
+
+# --------------------------------------------------------------------------- #
+# InnerTube fast path (innertube.py, SHARED verbatim with FinTube): the NewPipe approach — ask YouTube's own JSON API one small
+# question instead of running yt-dlp. Used IN FRONT of yt-dlp for resolve and the 403 self-heal; every caller falls back
+# to the yt-dlp path that existed before on ANY failure, so the worst case is the old behaviour
+# plus one cheap failed request. On-device yt-dlp costs a 1.3s spawn or a multi-second in-process
+# HTML parse per question; the InnerTube answer is one ~100-300 ms POST.
+# --------------------------------------------------------------------------- #
+_INNERTUBE = {"mod": None, "tried": False}
+# Circuit breaker for the fast PLAYER: a bot-check answer means the client/visitor is burned (not
+# that this one video is restricted), so after a couple in a row stop trying for a while — every
+# resolve would otherwise pay a doomed request before its yt-dlp fallback.
+_FAST_PLAYER_BOT_LIMIT = 2
+_FAST_PLAYER_COOLDOWN = 30 * 60
+_fast_player_state = {"bot_fails": 0, "off_until": 0.0, "strikes": []}
+# The same breaker also trips on googlevideo REFUSING fast-path URLs (probe or byte-0 403): the
+# request shape is fine on most networks, but if this one rejects it, yt-dlp's URLs are the cure.
+_FAST_URL_STRIKES = 2
+_FAST_URL_WINDOW = 10 * 60
+
+
+def _it():
+    """The innertube module, or None when it isn't shipped (tests stub it out)
+    or failed to import — callers then go straight to yt-dlp."""
+    if not _INNERTUBE["tried"]:
+        # Before its pool can open a single connection: a pooled IPv6 socket would mint player
+        # URLs bound to an address the (IPv4-pinned) proxy never fetches from.
+        _force_ipv4()
+        try:
+            import innertube as _m
+            _INNERTUBE["mod"] = _m
+        except Exception as ex:
+            _plog("innertube unavailable (%s) — yt-dlp only" % ex)
+        _INNERTUBE["tried"] = True
+    return _INNERTUBE["mod"]
+
+
+def _fast_player():
+    """The innertube module if the fast PLAYER path may run now, else None. A user-chosen
+    player_client is an explicit troubleshooting choice that only yt-dlp can honour, so it
+    disables the fast path; so does the bot-check circuit breaker."""
+    it = _it()
+    if it is None:
+        return None
+    if (get_settings().get("player_client") or "").strip().lower() not in ("", "auto"):
+        return None
+    if time.time() < _fast_player_state["off_until"]:
+        return None
+    return it
+
+
+def _fast_player_raw(video_id):
+    """innertube.player_info() with the circuit-breaker bookkeeping, or None on any failure."""
+    it = _fast_player()
+    if it is None or not re.fullmatch(r"[\w-]{11}", video_id or ""):
+        return None
+    _force_ipv4()          # googlevideo URLs are IP-bound: extract on the family the proxy streams on
+    _t = time.time()
+    try:
+        data = it.player_info(video_id)
+    except Exception as ex:
+        if getattr(ex, "bot", False):
+            _fast_player_state["bot_fails"] += 1
+            if _fast_player_state["bot_fails"] >= _FAST_PLAYER_BOT_LIMIT:
+                _fast_player_state["bot_fails"] = 0
+                _fast_player_state["off_until"] = time.time() + _FAST_PLAYER_COOLDOWN
+                _plog("fast player bot-walled twice — yt-dlp only for %ds" % _FAST_PLAYER_COOLDOWN)
+        _tlog("fast player failed %.2fs → yt-dlp: %s" % (time.time() - _t, str(ex)[:120]))
+        return None
+    _fast_player_state["bot_fails"] = 0
+    _tlog("fast player %.2fs (%d formats)" % (time.time() - _t, len(data.get("formats") or [])))
+    return data
+
+
+def _fast_strike(why):
+    """One piece of evidence that googlevideo won't serve fast-path URLs on this network. Two
+    within _FAST_URL_WINDOW open the same breaker the bot-check uses: resolve goes back to
+    yt-dlp (whose URLs this network demonstrably accepted) for _FAST_PLAYER_COOLDOWN."""
+    now = time.time()
+    st = _fast_player_state
+    st["strikes"] = [t for t in st.get("strikes") or [] if now - t < _FAST_URL_WINDOW] + [now]
+    _tlog("fast path strike %d/%d: %s" % (len(st["strikes"]), _FAST_URL_STRIKES, why))
+    if len(st["strikes"]) >= _FAST_URL_STRIKES:
+        st["strikes"] = []
+        st["off_until"] = now + _FAST_PLAYER_COOLDOWN
+        _tlog("fast player off for %ds — yt-dlp resolves meanwhile" % _FAST_PLAYER_COOLDOWN)
+
+
+def _probe_status(url, ua, timeout=3):
+    """HTTP status of the first request playback will make (same header set, same Range: byte 0
+    to the end of _DirectFetch's first bounded chunk), reading only 2 bytes of it, or None when
+    the network itself failed (no verdict on the URL). A 2-byte Range was too lenient: on device
+    (2026-10-15) four fast-path URLs in a row answered it 206 while playback's own 0-clen request
+    got 403 at byte 0 the same second, costing a 12s start."""
+    end, total = _DIRECT_CHUNK - 1, _clen(url)
+    if total:
+        end = min(end, total - 1)
+    try:
+        _force_ipv4()
+        with urllib.request.urlopen(_gv_request(url, ua, 0, end), timeout=timeout) as r:
+            r.read(2)
+            return getattr(r, "status", None) or r.getcode()
+    except urllib.error.HTTPError as ex:
+        return ex.code
+    except Exception:
+        return None
+
+
+def _fast_urls_ok(urls, ua):
+    """Probe fast-path URLs in parallel (~one RTT) before anything plays them. Any HTTP refusal
+    is a strike and a False — the caller then uses yt-dlp instead."""
+    urls = [u for u in urls if u]
+    codes = [None] * len(urls)
+
+    def run(i, u):
+        codes[i] = _probe_status(u, ua)
+    _t = time.time()
+    ts = [threading.Thread(target=run, args=(i, u), daemon=True) for i, u in enumerate(urls)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join(5)
+    ok = all(c is None or 200 <= c < 300 for c in codes)
+    _tlog("fast probe %.2fs %s%s" % (time.time() - _t, codes, "" if ok else " → yt-dlp"))
+    if not ok:
+        _fast_strike("probe answered %s" % codes)
+    return ok
+
+
+def _url_shape(u):
+    """DEBUG: the identity-free shape of a googlevideo URL — minting client, IP family, whether it
+    carries an n-challenge / PO token, time to expiry, and which params are signed."""
+    try:
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(u).query)
+        ip, exp = q.get("ip", [""])[0], _expire_ts(u)
+        return "c=%s ip=%s n=%s pot=%s exp=%+ds sparams=%s" % (
+            q.get("c", ["?"])[0], "v6" if ":" in ip else ("v4" if ip else "-"),
+            "y" if q.get("n") else "-", "y" if q.get("pot") else "-",
+            (exp - int(time.time())) if exp else 0, q.get("sparams", [""])[0])
+    except Exception:
+        return "?"
+
+
+def _fast_player_data(video_id):
+    """yt-dlp-shaped resolve data from ONE InnerTube player request, or None to use yt-dlp. Audio-only
+    (FinTune): only a plain on-demand video with a playable audio format qualifies — live/upcoming
+    stay on yt-dlp. The audio format resolve() will actually pick (_pick_audio, the same function
+    the resolve tail uses) is probed first, so a URL googlevideo refuses never reaches the player."""
+    data = _fast_player_raw(video_id)
+    if data is None or data.get("live_status") != "not_live":
+        return None
+    audio = _pick_audio(data.get("formats") or [])
+    if not audio or not audio.get("url"):
+        return None
+    ua = (audio.get("http_headers") or {}).get("User-Agent", "")
+    if not _fast_urls_ok([audio.get("url")], ua):
+        return None
+    return data
+
+
+def _loudness_db(data):
+    """YouTube's per-track loudnessDb (dB relative to its normalisation target; positive = louder
+    than target, so attenuate) from fast-path player data, or None. The VISIONOS client omits
+    loudnessDb but ships perceptualLoudnessDb + loudnessTargetLkfs, and loudnessDb is exactly
+    their difference (measured live against ANDROID_VR, which sends all three: 0.99 = -13.01 - -14,
+    5.71 = -8.29 - -14, 6.35, 2.29, 6.34 all matched) — so the same figure ytm.player_loudness
+    reads, without a second request."""
+    ld = (data or {}).get("loudness") or {}
+    try:
+        if ld.get("db") is not None:
+            return float(ld["db"])
+        if ld.get("perceptual_db") is not None and ld.get("target_lkfs") is not None:
+            return round(float(ld["perceptual_db"]) - float(ld["target_lkfs"]), 2)
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def _fast_client_url(url):
+    """True if a googlevideo URL was minted for the fast path's player client (its `c=` param), so
+    a 403 refresh can re-ask the same client and get the same itag shapes + UA back."""
+    it = _it()
+    if it is None or not url:
+        return False
+    try:
+        cname = it.player_client()[1]
+    except Exception:
+        return False
+    return bool(cname) and re.search(r"[?&]c=%s(?:&|$)" % re.escape(cname), url) is not None
+
+
+def _fast_formats_map(video_id):
+    """{format_id: url} from a fresh fast-path player request ({} on failure) — _reresolve's
+    cheap first try for a stream the fast path started."""
+    data = _fast_player_raw(video_id)
+    if not data:
+        return {}
+    return {f["format_id"]: f["url"] for f in (data.get("formats") or [])
+            if f.get("format_id") and f.get("url")}
+
+
+def _innertube_prewarm():
+    """Mint the player visitor id (and open a pooled keep-alive connection) off the UI path at
+    launch, so the first tap-to-play is a single request."""
+    it = _it()
+    if it is None:
+        return
+    _tlog("innertube prewarm: python %s, %s" % (sys.version.split()[0], ssl.OPENSSL_VERSION))
+    try:
+        _force_ipv4()
+        it.visitor_data()
+    except Exception as ex:
+        _plog("innertube prewarm failed: %s" % ex)
 
 # --------------------------------------------------------------------------- #
 # Resolve-RESULT cache + single-flight + speculative prefetch.  (REBUILD #1)
@@ -1348,6 +1595,14 @@ def invalidate_resolve_cache():
     login/logout (cheap — small dict, refills on demand)."""
     with _resolve_cache_lock:
         _resolve_cache.clear()
+
+
+def _drop_resolved(video_id):
+    """Forget every cached resolve of one video (any settings key): googlevideo refused its URLs."""
+    pre = str(video_id) + "\x1f"
+    with _resolve_cache_lock:
+        for k in [k for k in _resolve_cache if k.startswith(pre)]:
+            _resolve_cache.pop(k, None)
 
 
 def _resolve_and_cache(video_id, key=None, speculative=False):
@@ -1514,17 +1769,43 @@ def _ytdlp_path():
     return _system_binary("yt-dlp")
 
 
-def ytdlp_version():
-    """Installed yt-dlp version string, or '' if missing/broken."""
+def _ytdlp_version_path():
+    return os.path.join(_data_dir(), "ytdlp_version.json")
+
+
+def ytdlp_version(fresh=False):
+    """Installed yt-dlp version string, or '' if missing/broken. Remembered per binary (path +
+    size + mtime): `--version` is a full frozen-binary cold start (~0.4s+ on device) that used to
+    hold the main lane at every launch. An update or reinstall changes the stat, so a stale answer
+    can't outlive the binary; `fresh` forces the run (install uses it to prove the binary works)."""
     path = _ytdlp_path()
     if not path:
         return ""
     try:
+        st = os.stat(path)
+        sig = [path, st.st_size, st.st_mtime_ns]
+    except OSError:
+        sig = None
+    if sig and not fresh:
+        try:
+            with open(_ytdlp_version_path()) as f:
+                c = json.load(f)
+            if c.get("sig") == sig and c.get("version"):
+                return c["version"]
+        except Exception:
+            pass
+    try:
         out = subprocess.run([path, "--version"], capture_output=True,
                              text=True, timeout=15)
-        return out.stdout.strip()
+        v = out.stdout.strip()
     except Exception:
         return ""
+    if v and sig:
+        try:
+            _atomic_write_json(_ytdlp_version_path(), {"sig": sig, "version": v})
+        except Exception:
+            pass
+    return v
 
 
 def ytdlp_update():
@@ -1647,7 +1928,7 @@ def install_ytdlp():
                 return
             os.chmod(tmp, 0o755)
             os.replace(tmp, dest)
-            ver = ytdlp_version()  # exercises the binary — confirms it actually runs
+            ver = ytdlp_version(fresh=True)  # exercises the binary — confirms it actually runs
             if ver:
                 note = "Installed yt-dlp " + ver
                 if not expected:
@@ -1678,7 +1959,7 @@ def install_ytdlp():
 # stays the resilient DEFAULT (self-updating, needs no device Python/deps) AND the
 # fallback: ANY failure here (missing/broken/incompatible zip, import or extraction
 # error) falls through to the binary, so opting in can never make a resolve fail that the
-# binary would have served. Scope: only the TOKEN-FREE hot dump (tv_embedded, no PO
+# binary would have served. Scope: only the TOKEN-FREE hot dump (_token_free_client, no PO
 # token) runs in-process; every token / widen / gated dump keeps using the binary, so the
 # bgutil PO-token PLUGIN machinery is untouched and never needed in-process.
 # --------------------------------------------------------------------------- #
@@ -1889,6 +2170,17 @@ def _import_yt_dlp():
             _ensure_deno_on_path()   # in-process n-sig also uses Deno when it's present
             import yt_dlp as _m
             mod = _m
+            # The InnerTube fast path follows this yt-dlp's client definitions (web version + its
+            # JS-less default player client), so a YouTube-forced client change arrives with a
+            # yt-dlp update instead of needing an app release.
+            it = _it()
+            if it is not None:
+                try:
+                    _tlog("yt-dlp %s in-process; innertube player client: %s"
+                          % (getattr(getattr(mod, "version", None), "__version__", "?"),
+                             it.configure_from_ytdlp(mod)))
+                except Exception as ex:
+                    _plog("innertube client sync failed: %s" % ex)
         except Exception as ex:
             _plog("fast-resolve: yt-dlp import failed (%s) — using binary" % ex)
             mod = None
@@ -2424,7 +2716,7 @@ def _pot_http_ping(timeout=1.5):
 def _pot_of(u):
     """DEBUG: the streaming PO-token (`pot=`) state of a googlevideo URL, WITHOUT leaking the
     token — 'no-url' when the pick has no URL at all (a genuinely dead pick), 'no-pot' when the
-    URL just carries no pot= param (NORMAL for token-free clients like the anonymous tv_embedded
+    URL just carries no pot= param (NORMAL for token-free clients like the anonymous
     primary — only suspect when that same stream 403s at byte 0), else the token's length +
     8-char prefix. The old single 'MISSING' label conflated those two very different states."""
     if not u:
@@ -2614,19 +2906,36 @@ def _pot_rotate_log():
         pass
 
 
+_YTDLP_WARM_DELAY = 5.0       # seconds after launch: past the launch home/library loads
+_ytdlp_warm_armed = False
+
+
+def _delayed_ytdlp_warm():
+    _import_yt_dlp()
+    if _DEBUG:          # profiling: log the isolated yt-dlp spawn tax once per launch
+        _spawn_tax_probe()
+
+
 def prewarm():
     """Start the PO-token server in the background at app launch, so the first resolve doesn't pay
     the ~2s Deno startup on its critical path. No-op unless the provider is installed + enabled.
     Runs on its OWN daemon thread so the PyOtherSide worker (and the UI behind it) never blocks on
     the port wait — fire-and-forget from QML at startup."""
-    if _DEBUG:          # profiling: log the isolated yt-dlp spawn tax once per launch, off-thread
-        threading.Thread(target=_spawn_tax_probe, daemon=True).start()
-    # Fast resolve: import the yt-dlp zipapp NOW, on a throwaway thread, so the first resolve of the
-    # session doesn't pay the ~1.5s `import yt_dlp` on its critical path. The import is module-global
-    # (see _import_yt_dlp), so any thread warms it; a no-op on a too-old device python, before the
-    # zipapp arrives, or once already imported. _autofetch_zipapp then backfills a missing copy in
-    # the background (once per launch) so fast resolve just exists wherever it can run.
-    threading.Thread(target=_import_yt_dlp, daemon=True, name="ytdlp-import-prewarm").start()
+    global _ytdlp_warm_armed
+    # Warm the yt-dlp zipapp import (and, under debug, the spawn-tax probe) a few seconds AFTER
+    # launch, once per process (prewarm is also the provider "nudge"): the import is ~1.4s of
+    # CPU-bound Python on device, and run at once it competes for the GIL with the launch loads.
+    # Nothing at launch needs it: resolve goes through InnerTube first, and any fallback that does
+    # need yt-dlp imports it on demand (the import is module-global and locked).
+    # _autofetch_zipapp then backfills a missing copy in the background (once per launch).
+    if not _ytdlp_warm_armed:
+        _ytdlp_warm_armed = True
+        _t = threading.Timer(_YTDLP_WARM_DELAY, _delayed_ytdlp_warm)
+        _t.daemon = True
+        _t.name = "ytdlp-import-prewarm"
+        _t.start()
+    # InnerTube fast path: mint the player visitor id now so the first tap-to-play is ONE request.
+    threading.Thread(target=_innertube_prewarm, daemon=True, name="innertube-prewarm").start()
     _autofetch_zipapp()
     _pot_rotate_log()   # fresh server.log per launch (keeps the previous one as server.log.prev)
     if not _pot_active():
@@ -2945,17 +3254,22 @@ def _resolve_uncached(video_id):
     and buys music nothing).
     """
     path = _ytdlp_path()
-    if not path:
-        return {"ok": False, "error": "yt-dlp not found"}
     url = video_id
     if "://" not in url:
         url = "https://www.youtube.com/watch?v=" + video_id
     _t0 = time.time()
-    # Bring the PO-token sidecar up (no-op unless installed+enabled) — with a short grace, never
-    # owning the boot: the primary tv_embedded path is token-free, so when the server isn't up
-    # in time the dump proceeds without it and the still-booting server serves the next resolve.
-    _ensure_pot_server(wait=4)
-    _tlog("pot_ensure %.2fs" % (time.time() - _t0))
+    # FAST PATH: one InnerTube player request (see _fast_player_data). When it yields a playable
+    # audio format, yt-dlp, the PO-token sidecar and the probe below are skipped entirely; anything
+    # it can't serve (live, restricted, bot-walled, ciphered) drops to the unchanged yt-dlp ladder.
+    fast = _fast_player_data(video_id) if "://" not in video_id else None
+    if fast is None:
+        if not path:
+            return {"ok": False, "error": "yt-dlp not found"}
+        # Bring the PO-token sidecar up (no-op unless installed+enabled) — with a short grace, never
+        # owning the boot: the primary path is token-free, so when the server isn't up
+        # in time the dump proceeds without it and the still-booting server serves the next resolve.
+        _ensure_pot_server(wait=4)
+        _tlog("pot_ensure %.2fs" % (time.time() - _t0))
     def _dump(extra, anon=False):
         """Run yt-dlp --dump-single-json with extra args; return (data, error).
 
@@ -2966,7 +3280,7 @@ def _resolve_uncached(video_id):
         (Provider INACTIVE → a widen retry carries no fetch_pot marker and may run in-process
         too; equivalent by construction, since without the provider the binary loads no plugin.)
 
-        anon=True resolves WITHOUT the login cookies. YouTube gates token-free clients (tv_embedded)
+        anon=True resolves WITHOUT the login cookies. YouTube gates token-free clients
         HARD for AUTHENTICATED requests but not anonymous ones — confirmed on-device 2026-09-05: the
         same videos that 403'd (→ ~10s mweb+token fallback) signed-in resolved token-free in ~1.3s
         signed OUT. So the primary dump goes anonymous (public videos skip the gate entirely) and only
@@ -3008,20 +3322,28 @@ def _resolve_uncached(video_id):
 
     try:
         _client_used = _default_client() or "auto"   # which client actually produced the URLs (debug)
-        # Primary = token-free AND cookie-free. Authenticated token-free requests get gated by YouTube;
-        # anonymous ones don't. Public videos resolve here fast + un-gated; a restricted video fails
-        # this and drops to the cookie'd (+token) fallback below. (on-device confirmed 2026-09-05)
-        data, err = _dump(_yt_extractor_args(), anon=True)
+        if fast is not None:
+            # Fast-path data always carries a playable audio pick, so none of the widen/probe
+            # branches below fire.
+            data, err = fast, ""
+            _client_used = "innertube:" + _it().player_client()[0]
+        else:
+            # Primary = token-free AND cookie-free. Authenticated token-free requests get gated by
+            # YouTube; anonymous ones don't. Public videos resolve here fast + un-gated; a restricted
+            # video fails this and drops to the cookie'd (+token) fallback below. (on-device 2026-09-05)
+            data, err = _dump(_yt_extractor_args(), anon=True)
         # A hard failure (data is None) is usually YouTube's "confirm you're not a bot" check
         # tripping this client — retry once with the wider set. tv/android_vr use different
         # attestation and often pass where web/web_embedded get bot-checked.
-        if data is None:
+        if fast is not None:
+            pass
+        elif data is None:
             data2, err2 = _dump(_yt_extractor_args(client_override=_RETRY_CLIENTS, want_pot=True))
             if data2 is not None:
                 data = data2; _client_used = _RETRY_CLIENTS + "(widen)"
             else:
                 err = err or err2
-        # Music path: the primary (tv_embedded) almost always carries the full audio ladder
+        # Music path: the token-free primary almost always carries the full audio ladder
         # (+ muxed), so make do with ONE pass. Only widen the client net when it gave us
         # literally nothing an audio player can use.
         elif not _audio_playable(data):
@@ -3031,15 +3353,15 @@ def _resolve_uncached(video_id):
         if data is None:
             return {"ok": False, "error": err}
         formats = data.get("formats", [])
-        # Token-free fast-path probe: tv_embedded is the fast default and needs NO token, but token-free
+        # Token-free probe: the primary client is the fast default and needs NO token, but token-free
         # clients are the ones YouTube gates unpredictably — when gated the stream 403s the instant
         # playback fetches it. Probe one chosen URL; on a real 403 re-extract with the reliable TOKEN
         # path (mweb + a minted PO token) — done HERE, before playback, so the itags stay consistent
-        # (a mid-stream client switch can't: clients emit different itag shapes). Only when tv_embedded
-        # is OUR default choice (provider set up, no user-set player_client, no widen fired) — a user who
+        # (a mid-stream client switch can't: clients emit different itag shapes). Only when the
+        # token-free client is OUR default choice (provider set up, no user-set player_client, no widen fired) — a user who
         # explicitly picks a client keeps it, and a widen result already left _client_used != it.
         _manual_client = (get_settings().get("player_client") or "").strip().lower() not in ("", "auto")
-        if _pot_active() and not _manual_client and _client_used == "tv_embedded":
+        if _pot_active() and not _manual_client and _client_used == _token_free_client():
             _pt = (_pick_audio(formats) or _pick(formats, _MUXED_ITAGS) or {})
             if _pt.get("url") and "m3u8" not in (_pt.get("protocol") or ""):
                 _tp = time.time()
@@ -3065,10 +3387,11 @@ def _resolve_uncached(video_id):
         http_ua = ((audio or muxed or {}).get("http_headers") or {}).get(
             "User-Agent", "") or _BROWSER_UA
         if _DEBUG:   # instant-403 probe: which client, and does the COLD dump carry a valid pot= token?
-            _tlog("resolve picks [client=%s]: a=%s %s | m=%s %s"
-                  % (_client_used,
+            _tlog("resolve picks %s [client=%s]: a=%s %s | m=%s %s"
+                  % (video_id, _client_used,
                      (audio or {}).get("format_id"), _pot_of((audio or {}).get("url", "")),
                      (muxed or {}).get("format_id"), _pot_of((muxed or {}).get("url", ""))))
+            _tlog("resolve urls: a[%s]" % _url_shape((audio or {}).get("url", "")))
             if _pot_active():   # a first-mint crash/OOM shows here as an exit-code line between dumps
                 _tlog("pot log: " + ((_pot_server_log_tail(6) or "(none)").replace("\n", " | ")))
         # HLS (m3u8) plays fine directly, and proxying the manifest breaks segment
@@ -3113,6 +3436,8 @@ def _resolve_uncached(video_id):
             "muxed_itag": muxed.get("format_id", "") if muxed else "",
             "muxed_proto": muxed.get("protocol", "") if muxed else "",
             "audio_itag": audio.get("format_id", "") if audio else "",
+            # Only the fast path carries it (None -> QML falls back to ytm.player_loudness).
+            "loudness_db": _loudness_db(data) if fast is not None else None,
         }}
     except Exception as ex:
         return {"ok": False, "error": str(ex)}
@@ -3230,7 +3555,7 @@ _SETTINGS_DEFAULTS = {"player_client": "",
 # launch by _autofetch_zipapp); the binary stays the fallback for every failure. A stale
 # "fast_resolve" key from older builds may linger in settings.json — it is simply ignored.
 
-# Widened client net, tried in ONE extra yt-dlp pass when the primary (tv_embedded, or
+# Widened client net, tried in ONE extra yt-dlp pass when the primary (token-free client, or
 # yt-dlp's auto pick when no provider is set up) hard-fails on a bot-wall or returned
 # nothing audio-playable. yt-dlp queries them all and merges formats; the url-presence
 # filter in _pick keeps only the ones a SABR client can't serve. Unknown names are
@@ -3272,24 +3597,35 @@ def set_setting(key, value):
     return get_settings()
 
 
+def _token_free_client():
+    """The TOKEN-FREE, JS-less client the yt-dlp primary dump asks for: the installed yt-dlp's own
+    JS-less default (visionos as of 2026.08), as adopted by innertube.configure_from_ytdlp — the
+    same client the InnerTube fast path uses, so both paths mint the same itag shapes.
+    (This was a hardcoded `tv_embedded` until 2026-10: yt-dlp removed that client in 2026.01.31 and
+    silently skips unknown names, so the dump quietly ran yt-dlp's default set while the probe
+    gating and every log line still said tv_embedded.)"""
+    it = _it()
+    try:
+        return (it.player_client()[0] if it is not None else "") or "visionos"
+    except Exception:
+        return "visionos"
+
+
 def _default_client():
-    """Which YouTube client resolve() uses by default.
+    """Which YouTube client resolve()'s yt-dlp path uses by default.
 
     A user-set player_client always wins. Otherwise, when the PO-token provider is set up we default
-    to `tv_embedded` — a TOKEN-FREE client: it returns the full range-fetchable HD ladder with the
-    ORIGINAL audio (no DRC variants) and, crucially, needs NO Proof-of-Origin token, so resolve skips
-    the ~4-5s on-device BotGuard mint entirely (measured 2026-09-05: tv_embedded ≈1.5s incl. spawn +
-    HTTP 206 fetchable, vs web_embedded's ~5.5s dump — this is how NewPipe stays fast). Token-free
-    clients are the ones YouTube gates unpredictably, so resolve PROBES tv_embedded's URL once and,
-    only on a real 403 (gated), falls back to the reliable token path (`mweb` + a minted token). The
-    provider is thus a SAFETY NET for the rare gated video, not a per-resolve tax. (History: default was
-    web_embedded, then mweb-as-blanket-default on 2026-09-03 which put the mint on EVERY resolve — the
-    "slow as of late" reports; tv_embedded-first removes it from the common path.) With no provider set
-    up we leave yt-dlp on its own auto pick. resolve() also widens to _RETRY_CLIENTS if SABR-thin."""
+    to the TOKEN-FREE JS-less client (_token_free_client): the full range-fetchable ladder with
+    NO Proof-of-Origin token, so resolve skips the ~4-5s on-device BotGuard mint entirely.
+    Token-free clients are the ones YouTube gates unpredictably, so resolve PROBES the picked URL
+    once and, only on a real 403 (gated), falls back to the reliable token path (`mweb` + a minted
+    token). The provider is thus a SAFETY NET for the rare gated video, not a per-resolve tax.
+    With no provider set up we leave yt-dlp on its own auto pick. resolve() also widens to
+    _RETRY_CLIENTS if SABR-thin."""
     c = (get_settings().get("player_client") or "").strip()
     if c and c.lower() != "auto":
         return c
-    return "tv_embedded" if _pot_active() else ""
+    return _token_free_client() if _pot_active() else ""
 
 
 def _yt_extractor_args(client_override=None, want_pot=False):

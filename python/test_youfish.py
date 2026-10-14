@@ -12,6 +12,7 @@ are pinned here. youfish.py imports `pyotherside` only inside functions, so
 `import youfish` is safe here.
 """
 
+import base64
 import json
 import os
 import shutil
@@ -21,9 +22,17 @@ import sys
 import tempfile
 import types
 import unittest
+import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import youfish  # noqa: E402
+import innertube  # noqa: E402
+
+# The InnerTube fast path would hit the network, so the suite runs with it OFF by default (resolve
+# then takes the yt-dlp fallback, which the fixtures mock). The Innertube* tests below switch it
+# back on against canned responses.
+_REAL_IT = youfish._it
+youfish._it = lambda: None
 
 
 def vf(fid, height, vcodec, fps=30, url="v", note=None):
@@ -847,6 +856,12 @@ class _FakeHttpResp:
     def close(self):
         pass
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
+
 
 class DirectFetchStreamer(unittest.TestCase):
     """_DirectFetch: the in-process stand-in for the yt-dlp streaming child. Chunked Range
@@ -889,6 +904,16 @@ class DirectFetchStreamer(unittest.TestCase):
                                  {"Content-Range": "bytes %d-%d/%d" % (a, min(b, len(data) - 1),
                                                                        len(data))})
         youfish.urllib.request.urlopen = fake
+
+    def test_probe_asks_for_the_same_range_as_the_first_fetch(self):
+        self._serve(self.DATA)
+        for url in ("https://r.googlevideo.com/vp?clen=25", "https://r.googlevideo.com/vp?clen=7",
+                    "https://r.googlevideo.com/vp"):
+            del self.ranges[:]
+            self.assertEqual(youfish._probe_status(url, "UA"), 206)
+            youfish._DirectFetch(url, "UA", 0, youfish._clen(url)).read(1)
+            self.assertEqual(self.ranges[0], self.ranges[1], url)
+        self.assertEqual(self.ranges[0], (0, 9))
 
     @staticmethod
     def _drain(f, n=7):
@@ -1652,6 +1677,726 @@ class PlayerLoudness(unittest.TestCase):
         self.assertIsNone(res["loudness_db"])
         self.assertEqual(called["n"], 0)            # no network call for an empty id
 
+
+# --- InnerTube fast path (innertube.py + the youfish wiring) ---------------------------------- #
+# Canned responses mirror the shapes captured live from YouTube (2026-10): lockupViewModel channel
+# grids, shortsLockupViewModel Shorts, pageHeaderViewModel headers, VISIONOS player responses.
+
+CID = "UCBJycsmduvYEL83R_U4JriQ"
+_REAL_TRANSPORT = innertube._transport
+
+
+def _lockup(vid, title, dur="11:47", views="4.8M views", ago="19 hours ago", live=False,
+            members=False):
+    badge = {"thumbnailBadgeViewModel": {
+        "text": "LIVE" if live else dur,
+        "badgeStyle": "THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE" if live else
+                      "THUMBNAIL_OVERLAY_BADGE_STYLE_DEFAULT"}}
+    row = {"metadataParts": [{"text": {"content": views}}] +
+                            ([{"text": {"content": ago}}] if ago else [])}
+    if members:
+        row["badges"] = [{"badgeViewModel": {"badgeText": "Members only",
+                                             "badgeStyle": "BADGE_MEMBERS_ONLY"}}]
+    return {"richItemRenderer": {"content": {"lockupViewModel": {
+        "contentId": vid, "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+        "contentImage": {"thumbnailViewModel": {"overlays": [
+            {"thumbnailBottomOverlayViewModel": {"badges": [badge]}}]}},
+        "metadata": {"lockupMetadataViewModel": {
+            "title": {"content": title},
+            "metadata": {"contentMetadataViewModel": {"metadataRows": [row]}}}}}}}}
+
+
+def _cont_item(token):
+    return {"continuationItemRenderer": {"continuationEndpoint": {
+        "continuationCommand": {"token": token}}}}
+
+
+def _browse(items, tab="Videos", cid=CID, name="Marques Brownlee"):
+    content = {"richGridRenderer": {"contents": items}} if tab else {"sectionListRenderer": {}}
+    return {
+        "metadata": {"channelMetadataRenderer": {
+            "title": name, "externalId": cid,
+            "channelUrl": "https://www.youtube.com/channel/" + cid,
+            "avatar": {"thumbnails": [{"url": "https://yt3.example/av=s900-c-k", "width": 900,
+                                       "height": 900}]}}},
+        "header": {"pageHeaderRenderer": {"content": {"pageHeaderViewModel": {
+            "metadata": {"contentMetadataViewModel": {"metadataRows": [
+                {"metadataParts": [{"text": {"content": "@mkbhd"}}]},
+                {"metadataParts": [{"text": {"content": "21.4M subscribers"}},
+                                   {"text": {"content": "1.8K videos"}}]}]}}}}}},
+        "contents": {"twoColumnBrowseResultsRenderer": {"tabs": [
+            {"tabRenderer": {"title": "Home", "selected": not tab}},
+            {"tabRenderer": {"title": tab or "Videos", "selected": bool(tab), "content": content}}]}},
+    }
+
+
+def _shorts_item(vid, title):
+    return {"richItemRenderer": {"content": {"shortsLockupViewModel": {
+        "entityId": "shorts-shelf-item-" + vid,
+        "onTap": {"innertubeCommand": {"reelWatchEndpoint": {"videoId": vid}}},
+        "overlayMetadata": {"primaryText": {"content": title},
+                            "secondaryText": {"content": "7.9M views"}}}}}}
+
+
+def _player(vid="dQw4w9WgXcQ", status="OK", reason=None, live=False, dubbed=False):
+    def fmt(itag, mime, **kw):
+        d = {"itag": itag, "mimeType": mime, "bitrate": 1000 * (itag % 300),
+             "url": "https://rr1.googlevideo.com/videoplayback?c=VISIONOS&itag=%d&expire=%d"
+                    % (itag, int(time.time()) + 20000),
+             "contentLength": "1000"}
+        d.update(kw)
+        return d
+    if dubbed:
+        audio = [fmt(251, 'audio/webm; codecs="opus"', audioQuality="AUDIO_QUALITY_MEDIUM",
+                     audioTrack={"displayName": "English original", "id": "en.4",
+                                 "audioIsDefault": True}),
+                 fmt(251, 'audio/webm; codecs="opus"', audioQuality="AUDIO_QUALITY_MEDIUM",
+                     audioTrack={"displayName": "Japanese", "id": "ja.3",
+                                 "audioIsDefault": False})]
+    else:
+        audio = [fmt(251, 'audio/webm; codecs="opus"', audioQuality="AUDIO_QUALITY_MEDIUM"),
+                 fmt(251, 'audio/webm; codecs="opus"', audioQuality="AUDIO_QUALITY_MEDIUM",
+                     isDrc=True),
+                 fmt(140, 'audio/mp4; codecs="mp4a.40.2"', audioQuality="AUDIO_QUALITY_MEDIUM")]
+    video = [fmt(137, 'video/mp4; codecs="avc1.640028"', height=1080, width=1920, fps=30,
+                 qualityLabel="1080p"),
+             fmt(136, 'video/mp4; codecs="avc1.4d401f"', height=720, width=1280, fps=30,
+                 qualityLabel="720p"),
+             fmt(247, 'video/webm; codecs="vp9"', height=720, width=1280, fps=30,
+                 qualityLabel="720p"),
+             fmt(398, 'video/mp4; codecs="av01.0.05M.08"', height=720, width=1280, fps=30,
+                 qualityLabel="720p"),
+             {"itag": 299, "mimeType": 'video/mp4; codecs="avc1.64002a"', "height": 1080,
+              "signatureCipher": "s=abc&url=https%3A%2F%2Fx"}]          # ciphered → dropped
+    return {
+        "playabilityStatus": {"status": status, "reason": reason},
+        "videoDetails": {"videoId": vid, "title": "Never Gonna", "author": "Rick",
+                         "channelId": CID, "lengthSeconds": "213", "viewCount": "1700000000",
+                         "isLive": live,
+                         "shortDescription": "0:00 Intro\n1:00 Verse\n2:30 Chorus\n"},
+        "streamingData": {} if status != "OK" else {"adaptiveFormats": video + audio},
+        "captions": {"playerCaptionsTracklistRenderer": {
+            "captionTracks": [
+                {"baseUrl": "https://www.youtube.com/api/timedtext?v=x&lang=en", "languageCode": "en",
+                 "name": {"runs": [{"text": "English"}]}},
+                {"baseUrl": "https://www.youtube.com/api/timedtext?v=x&lang=en&kind=asr",
+                 "languageCode": "en", "kind": "asr",
+                 "name": {"runs": [{"text": "English (auto-generated)"}]}}],
+            "translationLanguages": [
+                {"languageCode": "de", "languageName": {"runs": [{"text": "German"}]}},
+                {"languageCode": "en", "languageName": {"runs": [{"text": "English"}]}}]}},
+    }
+
+
+class _FakeTransport:
+    """Stand-in for innertube._transport: answers by endpoint (+ browse params / continuation)."""
+    def __init__(self, routes):
+        self.routes, self.calls = routes, []
+
+    def __call__(self, method, url, body=None, headers=None, timeout=10):
+        ep = url.split("/youtubei/v1/")[1].split("?")[0]
+        req = json.loads(body.decode()) if body else {}
+        self.calls.append((ep, req, headers or {}))
+        key = ep
+        if ep == "browse":
+            key = "browse:" + (req.get("continuation") or
+                               "%s/%s" % (req.get("browseId"), req.get("params")))
+        ans = self.routes.get(key)
+        if ans is None:
+            return 404, b"{}"
+        if isinstance(ans, Exception):
+            raise ans
+        return 200, json.dumps(ans).encode()
+
+
+class InnertubeParsing(unittest.TestCase):
+    def setUp(self):
+        self._t = innertube._transport
+        innertube._visitor.update({"data": "", "ts": 0.0})
+        innertube._cid_cache.clear()
+
+    def tearDown(self):
+        innertube._transport = self._t
+
+    def _route(self, routes):
+        innertube._transport = _FakeTransport(routes)
+        return innertube._transport
+
+    def test_text_and_count_parsers(self):
+        self.assertEqual(innertube.text({"runs": [{"text": "a"}, {"text": "b"}]}), "ab")
+        self.assertEqual(innertube.text({"simpleText": "x"}), "x")
+        self.assertEqual(innertube.text({"content": "y"}), "y")
+        self.assertEqual(innertube.parse_count("4.8M views"), 4800000)
+        self.assertEqual(innertube.parse_count("1,234 views"), 1234)
+        self.assertEqual(innertube.parse_count("21.4M subscribers"), 21400000)
+        self.assertEqual(innertube.parse_count("1.8K videos"), 1800)
+        self.assertEqual(innertube.parse_count("No views"), 0)
+        self.assertEqual(innertube.parse_duration("11:47"), 707)
+        self.assertEqual(innertube.parse_duration("1:02:03"), 3723)
+        self.assertEqual(innertube.parse_duration("LIVE"), 0)
+        self.assertEqual(innertube.parse_ago("19 hours ago"), 19 * 3600)
+        self.assertEqual(innertube.parse_ago("Streamed 2 days ago"), 2 * 86400)
+        self.assertIsNone(innertube.parse_ago("Scheduled for 10/20/26"))
+
+    def test_channel_tab_lockups_header_and_continuation(self):
+        params = innertube.urllib.parse.unquote(innertube.TAB_PARAMS["videos"])
+        t = self._route({"browse:%s/%s" % (CID, params): _browse([
+            _lockup("aaaaaaaaaa1", "New one"),
+            _lockup("aaaaaaaaaa2", "On air", live=True, views="1.2K watching", ago=None),
+            _lockup("aaaaaaaaaa3", "Members", members=True),
+            {"richItemRenderer": {"content": {"videoRenderer": {   # legacy renderer still parses
+                "videoId": "aaaaaaaaaa4", "title": {"runs": [{"text": "Legacy"}]},
+                "lengthText": {"simpleText": "1:02:03"}, "viewCountText": {"simpleText": "12 views"},
+                "publishedTimeText": {"simpleText": "3 weeks ago"}}}}},
+            _cont_item("TOKEN1")])})
+        res = innertube.channel_tab(CID, "videos")
+        items = {i["id"]: i for i in res["items"]}
+        self.assertEqual(list(items), ["aaaaaaaaaa1", "aaaaaaaaaa2", "aaaaaaaaaa3", "aaaaaaaaaa4"])
+        self.assertEqual(items["aaaaaaaaaa1"]["duration"], 707)
+        self.assertEqual(items["aaaaaaaaaa1"]["views"], 4800000)
+        self.assertEqual(items["aaaaaaaaaa1"]["ago"], 19 * 3600)
+        self.assertTrue(items["aaaaaaaaaa2"]["live"])
+        self.assertTrue(items["aaaaaaaaaa3"]["members"])
+        self.assertEqual(items["aaaaaaaaaa4"]["duration"], 3723)
+        self.assertEqual(res["continuation"], "TOKEN1")
+        ch = res["channel"]
+        self.assertEqual((ch["id"], ch["name"], ch["subscribers"], ch["video_count"]),
+                         (CID, "Marques Brownlee", 21400000, 1800))
+        self.assertTrue(ch["avatars"])
+        self.assertEqual(t.calls[0][2]["X-YouTube-Client-Name"], "1")   # browse = WEB client
+
+    def test_missing_tab_raises(self):
+        params = innertube.urllib.parse.unquote(innertube.TAB_PARAMS["videos"])
+        self._route({"browse:%s/%s" % (CID, params): _browse([], tab=None)})
+        with self.assertRaises(innertube.InnertubeError):
+            innertube.channel_tab(CID, "videos")
+
+    def test_shorts_and_continuation(self):
+        params = innertube.urllib.parse.unquote(innertube.TAB_PARAMS["shorts"])
+        self._route({
+            "browse:%s/%s" % (CID, params): _browse([_shorts_item("sssssssss01", "A short")],
+                                                    tab="Shorts"),
+            "browse:TOKEN1": {"onResponseReceivedActions": [{"appendContinuationItemsAction": {
+                "continuationItems": [_lockup("bbbbbbbbbb1", "Older"), _cont_item("TOKEN2")]}}]}})
+        sh = innertube.channel_tab(CID, "shorts")["items"]
+        self.assertEqual([(i["id"], i["short"], i["title"]) for i in sh],
+                         [("sssssssss01", True, "A short")])
+        c = innertube.continuation("TOKEN1")
+        self.assertEqual([i["id"] for i in c["items"]], ["bbbbbbbbbb1"])
+        self.assertEqual(c["continuation"], "TOKEN2")
+
+    def test_resolve_channel(self):
+        t = self._route({"navigation/resolve_url": {"endpoint": {"browseEndpoint": {"browseId": CID}}}})
+        self.assertEqual(innertube.resolve_channel(CID), CID)                       # no request
+        self.assertEqual(innertube.resolve_channel("https://www.youtube.com/channel/%s/videos" % CID), CID)
+        self.assertEqual(len(t.calls), 0)
+        self.assertEqual(innertube.resolve_channel("https://www.youtube.com/@mkbhd/videos"), CID)
+        self.assertEqual(innertube.resolve_channel("@mkbhd"), CID)                  # cached now
+        self.assertEqual(len(t.calls), 1)
+        self.assertEqual(t.calls[0][1]["url"], "https://www.youtube.com/@mkbhd")
+
+    def test_player_info_shapes_formats_like_ytdlp(self):
+        t = self._route({"visitor_id": {"responseContext": {"visitorData": "VD1"}},
+                         "player": _player()})
+        info = innertube.player_info("dQw4w9WgXcQ")
+        fmts = {f["format_id"]: f for f in info["formats"]}
+        self.assertIn("251", fmts)
+        self.assertIn("251-drc", fmts)                         # DRC variant named like yt-dlp
+        self.assertNotIn("299", fmts)                          # ciphered: yt-dlp's job, not ours
+        v = fmts["137"]
+        self.assertEqual((v["ext"], v["vcodec"], v["acodec"], v["height"], v["fps"]),
+                         ("mp4", "avc1.640028", "none", 1080, 30))
+        a = fmts["140"]
+        self.assertEqual((a["ext"], a["vcodec"], a["acodec"]), ("m4a", "none", "mp4a.40.2"))
+        self.assertEqual(a["format_note"], "medium")
+        self.assertTrue(v["http_headers"]["User-Agent"])
+        self.assertEqual(info["channel_url"], "https://www.youtube.com/channel/" + CID)
+        self.assertEqual([c["start_time"] for c in info["chapters"]], [0, 60, 150])
+        self.assertEqual(info["live_status"], "not_live")
+        self.assertEqual(list(info["subtitles"]), ["en"])
+        self.assertIn("fmt=json3", info["subtitles"]["en"][0]["url"])
+        self.assertIn("de", info["automatic_captions"])
+        self.assertIn("tlang=de", info["automatic_captions"]["de"][0]["url"])
+        self.assertNotIn("tlang", info["automatic_captions"]["en"][0]["url"])   # the real ASR track
+        # The visitor id is minted once and rides on the player call.
+        self.assertEqual([c[0] for c in t.calls], ["visitor_id", "player"])
+        self.assertEqual(t.calls[1][2]["X-Goog-Visitor-Id"], "VD1")
+        # ...in the header only: the player body mirrors yt-dlp's (hl + UTC, no gl, html5 pref).
+        req = t.calls[1][1]
+        self.assertEqual(req["context"]["client"]["clientName"], "VISIONOS")
+        self.assertNotIn("gl", req["context"]["client"])
+        self.assertNotIn("visitorData", req["context"]["client"])
+        self.assertEqual(req["context"]["client"]["timeZone"], "UTC")
+        self.assertEqual(req["playbackContext"]["contentPlaybackContext"]["html5Preference"],
+                         "HTML5_PREF_WANTS")
+        self.assertTrue(req["contentCheckOk"] and req["racyCheckOk"])
+        innertube.player_info("dQw4w9WgXcQ")
+        self.assertEqual([c[0] for c in t.calls], ["visitor_id", "player", "player"])
+
+    def test_player_info_dubbed_tracks(self):
+        self._route({"visitor_id": {"responseContext": {"visitorData": "VD1"}},
+                     "player": _player(dubbed=True)})
+        fmts = {f["format_id"]: f for f in innertube.player_info("dQw4w9WgXcQ")["formats"]}
+        en, ja = fmts["251-en.4"], fmts["251-ja.3"]
+        self.assertEqual((en["language"], en["language_preference"]), ("en", 10))
+        self.assertEqual((ja["language"], ja["language_preference"]), ("ja", -1))
+        self.assertEqual(youfish._pick_audio(list(fmts.values()))["format_id"], "251-en.4")
+
+    def test_bot_wall_is_flagged_and_burns_the_visitor(self):
+        self._route({"visitor_id": {"responseContext": {"visitorData": "VD1"}},
+                     "player": _player(status="LOGIN_REQUIRED",
+                                       reason="Sign in to confirm you're not a bot")})
+        with self.assertRaises(innertube.Unplayable) as cm:
+            innertube.player_info("dQw4w9WgXcQ")
+        self.assertTrue(cm.exception.bot)
+        self.assertEqual(innertube._visitor["data"], "")       # re-minted on the next call
+
+    def test_chapters_rules(self):
+        f = innertube.chapters_from_description
+        self.assertEqual(f("0:00 a\n0:05 b\n1:00 c"), [])           # < 10s apart → not chapters
+        self.assertEqual(f("1:00 a\n2:00 b\n3:00 c"), [])           # must start at 0:00
+        self.assertEqual(f("0:00 a\n1:00 b"), [])                   # need at least three
+        self.assertEqual([c["title"] for c in f("Intro - 0:00\nMiddle - 2:00\nEnd - 1:00:00")],
+                         ["Intro", "Middle", "End"])
+
+    def test_configure_from_ytdlp_follows_jsless_default(self):
+        class Policy:
+            def __init__(self, required):
+                self.required = required
+        base = types.ModuleType("yt_dlp.extractor.youtube._base")
+        base.INNERTUBE_CLIENTS = {
+            "web": {"INNERTUBE_CONTEXT": {"client": {"clientName": "WEB",
+                                                     "clientVersion": "2.20990101.00.00"}}},
+            "needs_js": {"REQUIRE_JS_PLAYER": True},
+            "needs_pot": {"REQUIRE_JS_PLAYER": False, "INNERTUBE_CONTEXT_CLIENT_NAME": 5,
+                          "GVS_PO_TOKEN_POLICY": {"https": Policy(True)},
+                          "INNERTUBE_CONTEXT": {"client": {"clientName": "X", "clientVersion": "1",
+                                                           "userAgent": "UA-X"}}},
+            "newclient": {"REQUIRE_JS_PLAYER": False, "INNERTUBE_CONTEXT_CLIENT_NAME": 77,
+                          "GVS_PO_TOKEN_POLICY": {"https": Policy(False)},
+                          "INNERTUBE_CONTEXT": {"client": {"clientName": "NEWCLIENT",
+                                                           "clientVersion": "9.9",
+                                                           "userAgent": "UA-NEW", "hl": "en"}}},
+        }
+        video = types.ModuleType("yt_dlp.extractor.youtube._video")
+        video.YoutubeIE = type("YoutubeIE", (), {
+            "_DEFAULT_JSLESS_CLIENTS": ("needs_js", "needs_pot", "newclient")})
+        names = ["yt_dlp", "yt_dlp.extractor", "yt_dlp.extractor.youtube",
+                 "yt_dlp.extractor.youtube._base", "yt_dlp.extractor.youtube._video"]
+        saved_mods = {n: sys.modules.get(n) for n in names}
+        saved_player, saved_web = dict(innertube._PLAYER), dict(innertube._WEB)
+        pkg = types.ModuleType("yt_dlp.extractor.youtube")
+        pkg._base, pkg._video = base, video
+        for n, m in zip(names, [types.ModuleType("yt_dlp"), types.ModuleType("yt_dlp.extractor"),
+                                pkg, base, video]):
+            sys.modules[n] = m
+        try:
+            innertube._visitor.update({"data": "OLD", "ts": time.time()})
+            self.assertEqual(innertube.configure_from_ytdlp(None), "newclient")
+            self.assertEqual(innertube.player_client(), ("newclient", "NEWCLIENT", "UA-NEW"))
+            self.assertEqual(innertube._WEB["clientVersion"], "2.20990101.00.00")
+            self.assertEqual(innertube._visitor["data"], "")     # new client → new visitor id
+        finally:
+            for n, m in saved_mods.items():
+                if m is None:
+                    sys.modules.pop(n, None)
+                else:
+                    sys.modules[n] = m
+            innertube._PLAYER.clear(); innertube._PLAYER.update(saved_player)
+            innertube._WEB.clear(); innertube._WEB.update(saved_web)
+
+
+class _FakeIT:
+    """A stand-in innertube module for the youfish wiring tests."""
+    InnertubeError = innertube.InnertubeError
+
+    def __init__(self):
+        self.player = None           # dict or Exception
+        self.calls = []
+
+    def player_client(self):
+        return ("visionos", "VISIONOS", "UA-V")
+
+    def player_info(self, vid):
+        self.calls.append(("player", vid))
+        if isinstance(self.player, Exception):
+            raise self.player
+        return json.loads(json.dumps(self.player))
+
+    def visitor_data(self):
+        return "V"
+
+
+class InnertubeEngineWiring(unittest.TestCase):
+    """The fast path wired into the audio-only resolve + 403 self-heal (all offline)."""
+
+    def setUp(self):
+        self._saved = {n: getattr(youfish, n) for n in (
+            "_it", "_ytdlp_path", "_ensure_pot_server", "_pot_ytdlp_args", "_yt_extractor_args",
+            "_proxied", "get_settings", "_import_yt_dlp", "_data_dir", "_pot_active",
+            "_ytdlp_formats", "_url_cache", "_probe_status")}
+        self._run = youfish.subprocess.run
+        self._tmp = tempfile.mkdtemp(prefix="it-")
+        self.fake = _FakeIT()
+        youfish._it = lambda: self.fake
+        youfish._ytdlp_path = lambda: "/fake/yt-dlp"
+        youfish._ensure_pot_server = lambda **kw: True
+        youfish._pot_ytdlp_args = lambda: []
+        youfish._yt_extractor_args = lambda client_override=None, want_pot=False: []
+        youfish._proxied = lambda url, *a, **k: url
+        youfish.get_settings = lambda: {}
+        youfish._import_yt_dlp = lambda: None
+        youfish._data_dir = lambda: self._tmp
+        youfish._url_cache = {}
+        youfish._fast_player_state.update({"bot_fails": 0, "off_until": 0.0, "strikes": []})
+        self.probed = []
+
+        def probe(url, ua, timeout=3):
+            self.probed.append(url)
+            return 206
+        youfish._probe_status = probe
+        youfish.invalidate_resolve_cache()
+        self.spawns = []
+
+        def no_spawn(cmd, **kw):
+            self.spawns.append(cmd)
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="spawned in a fast-path test")
+        youfish.subprocess.run = no_spawn
+
+    def tearDown(self):
+        for n, f in self._saved.items():
+            setattr(youfish, n, f)
+        youfish.subprocess.run = self._run
+        youfish._fast_player_state.update({"bot_fails": 0, "off_until": 0.0, "strikes": []})
+        youfish.invalidate_resolve_cache()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _fast_data(self, loudness=None, **kw):
+        pr = _player(**kw)
+        if loudness:
+            pr["playerConfig"] = {"audioConfig": loudness}
+        innertube._transport = _FakeTransport({"visitor_id": {"responseContext": {"visitorData": "V"}},
+                                               "player": pr})
+        try:
+            innertube._visitor.update({"data": "", "ts": 0.0})
+            return innertube.player_info("dQw4w9WgXcQ")
+        finally:
+            innertube._transport = _REAL_TRANSPORT
+
+    def _ytdlp_run(self, cmd, **kw):
+        self.spawns.append(cmd)
+        data = {"title": "Y", "duration": 10,
+                "formats": [af("251", 160, "opus", url="https://yt/251")]}
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps(data), stderr="")
+
+    def test_resolve_uses_fast_path_without_ytdlp(self):
+        self.fake.player = self._fast_data()
+        res = youfish.resolve("dQw4w9WgXcQ")
+        self.assertTrue(res.get("ok"), res)
+        info = res["info"]
+        self.assertEqual(info["audio_itag"], "251")              # opus, non-DRC wins the tie
+        self.assertEqual(info["title"], "Never Gonna")
+        self.assertTrue(info["audio_urls"])
+        self.assertEqual(self.spawns, [])                        # no yt-dlp at all
+        self.assertEqual(len(self.probed), 1)                    # ONLY the audio URL was probed
+        self.assertIn("itag=251", self.probed[0])
+
+    def test_resolve_without_ytdlp_binary_still_works_on_fast_path(self):
+        youfish._ytdlp_path = lambda: ""
+        self.fake.player = self._fast_data()
+        self.assertTrue(youfish.resolve("dQw4w9WgXcQ").get("ok"))
+
+    def test_loudness_carried_from_perceptual_and_target(self):
+        self.fake.player = self._fast_data(loudness={"perceptualLoudnessDb": -8.29,
+                                                     "loudnessTargetLkfs": -14})
+        info = youfish.resolve("dQw4w9WgXcQ")["info"]
+        self.assertAlmostEqual(info["loudness_db"], 5.71, places=2)
+
+    def test_loudness_prefers_explicit_db_and_is_none_when_absent(self):
+        self.assertEqual(youfish._loudness_db({"loudness": {"db": 0.99, "perceptual_db": -9,
+                                                            "target_lkfs": -14}}), 0.99)
+        self.assertIsNone(youfish._loudness_db({"loudness": {"db": None, "perceptual_db": None,
+                                                             "target_lkfs": None}}))
+        self.assertIsNone(youfish._loudness_db({}))
+
+    def test_ytdlp_resolve_has_no_loudness(self):
+        self.fake.player = innertube.Unplayable("nope")
+        youfish.subprocess.run = self._ytdlp_run
+        info = youfish.resolve("dQw4w9WgXcQ")["info"]
+        self.assertIsNone(info["loudness_db"])
+
+    def test_refused_fast_urls_fall_back_and_trip_the_breaker(self):
+        self.fake.player = self._fast_data()
+        youfish._probe_status = lambda url, ua, timeout=3: 403
+        youfish.subprocess.run = self._ytdlp_run
+        res = youfish.resolve("dQw4w9WgXcQ")
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res["info"]["title"], "Y")               # yt-dlp's answer, not the fast one
+        self.assertEqual(len(self.spawns), 1)
+        self.assertEqual(len(youfish._fast_player_state["strikes"]), 1)
+        youfish.invalidate_resolve_cache()
+        youfish.resolve("dQw4w9WgXcQ")                            # second refusal opens the breaker
+        self.assertGreater(youfish._fast_player_state["off_until"], time.time())
+        n = len([c for c in self.fake.calls if c[0] == "player"])
+        youfish.invalidate_resolve_cache()
+        youfish.resolve("dQw4w9WgXcQ")
+        self.assertEqual(len([c for c in self.fake.calls if c[0] == "player"]), n)   # not asked
+
+    def test_strikes_expire_outside_the_window(self):
+        youfish._fast_player_state["strikes"] = [time.time() - youfish._FAST_URL_WINDOW - 5]
+        youfish._fast_strike("x")
+        self.assertEqual(len(youfish._fast_player_state["strikes"]), 1)
+        self.assertEqual(youfish._fast_player_state["off_until"], 0.0)
+
+    def test_network_failure_in_probe_is_no_verdict(self):
+        self.fake.player = self._fast_data()
+        youfish._probe_status = lambda url, ua, timeout=3: None
+        self.assertIsNotNone(youfish._fast_player_data("dQw4w9WgXcQ"))
+        self.assertEqual(youfish._fast_player_state["strikes"], [])
+
+    def test_resolve_falls_back_when_fast_path_fails(self):
+        self.fake.player = innertube.Unplayable("Sign in to confirm your age")
+        youfish.subprocess.run = self._ytdlp_run
+        res = youfish.resolve("dQw4w9WgXcQ")
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res["info"]["title"], "Y")
+        self.assertEqual(len(self.spawns), 1)
+
+    def test_live_and_user_client_skip_fast_path(self):
+        self.fake.player = self._fast_data(live=True)
+        self.assertIsNone(youfish._fast_player_data("dQw4w9WgXcQ"))     # live -> yt-dlp's path
+        self.fake.player = self._fast_data()
+        youfish.get_settings = lambda: {"player_client": "tv"}
+        self.assertIsNone(youfish._fast_player_data("dQw4w9WgXcQ"))     # explicit client honoured
+        self.assertEqual([c for c in self.fake.calls if c[0] == "player"], [("player", "dQw4w9WgXcQ")])
+
+    def test_no_audio_format_falls_back(self):
+        d = self._fast_data()
+        d["formats"] = [f for f in d["formats"] if f.get("vcodec") not in (None, "none")]
+        self.fake.player = d
+        self.assertIsNone(youfish._fast_player_data("dQw4w9WgXcQ"))
+
+    def test_bot_wall_trips_the_circuit_breaker(self):
+        self.fake.player = innertube.Unplayable("Sign in to confirm you're not a bot", bot=True)
+        for _ in range(youfish._FAST_PLAYER_BOT_LIMIT):
+            self.assertIsNone(youfish._fast_player_data("dQw4w9WgXcQ"))
+        n = len(self.fake.calls)
+        self.assertIsNone(youfish._fast_player_data("dQw4w9WgXcQ"))
+        self.assertEqual(len(self.fake.calls), n)                        # breaker open: no request
+
+    def test_reresolve_asks_the_fast_client_first(self):
+        self.fake.player = self._fast_data()
+        youfish._ytdlp_formats = lambda vid, anon=False: self.fail("yt-dlp re-resolve not needed")
+        fresh = youfish._reresolve("dQw4w9WgXcQ", "251",
+                                   "https://rr1.googlevideo.com/videoplayback?c=VISIONOS&itag=251&old=1")
+        self.assertIn("itag=251", fresh)
+
+    def test_reresolve_refused_fast_url_goes_to_ytdlp(self):
+        self.fake.player = self._fast_data()
+        youfish._probe_status = lambda url, ua, timeout=3: 403
+        youfish._ytdlp_formats = lambda vid, anon=False: {"251": "https://new/251"}
+        fresh = youfish._reresolve("dQw4w9WgXcQ", "251",
+                                   "https://rr1.googlevideo.com/videoplayback?c=VISIONOS&itag=251&old=1")
+        self.assertEqual(fresh, "https://new/251")
+        self.assertEqual(len(youfish._fast_player_state["strikes"]), 1)
+
+    def test_reresolve_after_a_refusal_skips_the_fast_client(self):
+        self.fake.player = self._fast_data()
+        old = "https://rr1.googlevideo.com/videoplayback?c=VISIONOS&itag=251&old=1"
+        youfish._url_cache = {"dQw4w9WgXcQ": {"ts": time.time(), "fmts": {
+            "251": "https://rr1.googlevideo.com/videoplayback?c=VISIONOS&itag=251&cached=1"}}}
+        youfish._ytdlp_formats = lambda vid, anon=False: {"251": "https://new/251"}
+        fresh = youfish._reresolve("dQw4w9WgXcQ", "251", old, refused=True)
+        self.assertEqual(fresh, "https://new/251")
+        self.assertEqual([c for c in self.fake.calls if c[0] == "player"], [])
+
+    def test_drop_resolved_forgets_only_that_video(self):
+        youfish._resolve_cache.update({
+            "aaaaaaaaaaa\x1fvisionos\x1f0": {"payload": {}, "good_until": time.time() + 99, "ts": 0},
+            "aaaaaaaaaaa\x1fvisionos\x1f1": {"payload": {}, "good_until": time.time() + 99, "ts": 0},
+            "bbbbbbbbbbb\x1fvisionos\x1f0": {"payload": {}, "good_until": time.time() + 99, "ts": 0}})
+        youfish._drop_resolved("aaaaaaaaaaa")
+        self.assertEqual(list(youfish._resolve_cache), ["bbbbbbbbbbb\x1fvisionos\x1f0"])
+
+    def test_reresolve_foreign_client_goes_to_ytdlp(self):
+        youfish._ytdlp_formats = lambda vid, anon=False: {"251": "https://new/251"}
+        fresh = youfish._reresolve("dQw4w9WgXcQ", "251", "https://rr1.googlevideo.com/x?c=TVHTML5&itag=251")
+        self.assertEqual(fresh, "https://new/251")
+        self.assertEqual(self.fake.calls, [])
+
+    def test_token_free_client_follows_innertube_not_tv_embedded(self):
+        self.assertEqual(youfish._token_free_client(), "visionos")
+        youfish._it = lambda: None
+        self.assertEqual(youfish._token_free_client(), "visionos")
+        youfish._pot_active = lambda: True
+        self.assertEqual(youfish._default_client(), "visionos")
+
+
+class YtmPlaylistContinuation(unittest.TestCase):
+    """ytm.get_playlist follows the shelf's continuation token up to `limit`."""
+
+    @staticmethod
+    def _row(vid):
+        return {"musicResponsiveListItemRenderer": {
+            "playlistItemData": {"videoId": vid},
+            "flexColumns": [{"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [
+                {"text": "Song " + vid}]}}}]}}
+
+    @classmethod
+    def _tail(cls, items, token):
+        if token:
+            items.append({"continuationItemRenderer": {"continuationEndpoint": {
+                "continuationCommand": {"token": token}}}})
+        return items
+
+    def _first(self, n, token):
+        items = self._tail([self._row("a%010d" % i) for i in range(n)], token)
+        return {"contents": {"twoColumnBrowseResultsRenderer": {"secondaryContents": {
+            "sectionListRenderer": {
+                "contents": [{"musicPlaylistShelfRenderer": {"contents": items}}],
+                # the section list's own token (the "related" area) must NOT be followed
+                "continuations": [{"nextContinuationData": {"continuation": "RELATED"}}]}}}}}
+
+    def _page(self, prefix, n, token):
+        items = self._tail([self._row("%s%010d" % (prefix, i)) for i in range(n)], token)
+        return {"onResponseReceivedActions": [{"appendContinuationItemsAction": {
+            "continuationItems": items}}]}
+
+    def setUp(self):
+        import ytm
+        self.ytm = ytm
+        self._orig = ytm._innertube
+        self.calls = []
+        pages = {"BID": self._first(3, "T1"), "T1": self._page("b", 3, "T2"),
+                 "T2": self._page("c", 2, None)}
+
+        def fake(endpoint, body, **kw):
+            key = body.get("continuation") or body.get("browseId")
+            self.calls.append(key)
+            if key not in pages:
+                raise RuntimeError("unexpected " + key)
+            return pages[key]
+        self.pages = pages
+        ytm._innertube = fake
+
+    def tearDown(self):
+        self.ytm._innertube = self._orig
+
+    def test_follows_continuations_to_the_end(self):
+        res = self.ytm.get_playlist("BID", limit=100)
+        self.assertEqual(len(res["tracks"]), 8)
+        self.assertEqual(self.calls, ["BID", "T1", "T2"])        # never the RELATED token
+
+    def test_stops_at_limit(self):
+        res = self.ytm.get_playlist("BID", limit=5)
+        self.assertEqual(len(res["tracks"]), 5)
+        self.assertEqual(self.calls, ["BID", "T1"])
+
+    def test_continuation_error_keeps_what_we_have(self):
+        base = self.ytm._innertube
+
+        def flaky(endpoint, body, **kw):
+            if body.get("continuation") == "T2":
+                raise RuntimeError("boom")
+            return base(endpoint, body, **kw)
+        self.ytm._innertube = flaky
+        res = self.ytm.get_playlist("BID", limit=100)
+        self.assertTrue(res["ok"])
+        self.assertEqual(len(res["tracks"]), 6)
+
+    def test_token_loop_is_cut(self):
+        self.pages["BID"] = self._first(2, "T9")
+        self.pages["T9"] = self._page("d", 2, "T9")               # points at itself
+        res = self.ytm.get_playlist("BID", limit=10000)
+        self.assertEqual(len(res["tracks"]), 4)                   # 2 + 2, then a page adding nothing
+
+
+class YtmAtomicStores(unittest.TestCase):
+    def setUp(self):
+        import ytm
+        self.ytm = ytm
+        self._tmp = tempfile.mkdtemp(prefix="ytm-")
+        self._dd = ytm._data_dir
+        ytm._data_dir = lambda: self._tmp
+
+    def tearDown(self):
+        self.ytm._data_dir = self._dd
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    @staticmethod
+    def _load(p):
+        with open(p) as f:
+            return json.load(f)
+
+    def test_atomic_write_is_private_and_leaves_no_temp(self):
+        p = os.path.join(self._tmp, "x.json")
+        self.ytm._atomic_write_json(p, {"a": 1})
+        self.assertEqual(self._load(p), {"a": 1})
+        self.assertEqual(os.stat(p).st_mode & 0o777, 0o600)
+        self.assertEqual(os.listdir(self._tmp), ["x.json"])
+
+    def test_failed_write_keeps_the_old_file(self):
+        p = os.path.join(self._tmp, "x.json")
+        self.ytm._atomic_write_json(p, {"a": 1})
+        with self.assertRaises(TypeError):
+            self.ytm._atomic_write_json(p, {"a": object()})
+        self.assertEqual(self._load(p), {"a": 1})
+        self.assertEqual(os.listdir(self._tmp), ["x.json"])
+
+    def test_play_history_dedups_and_survives_concurrent_writers(self):
+        ts = [threading.Thread(target=self.ytm.record_play, args=("v%010d" % i, "T")) for i in range(30)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        self.ytm.record_play("v0000000003", "again")
+        ids = [h["videoId"] for h in self.ytm.play_history(1000)]
+        self.assertEqual(len(ids), 30)                            # no lost updates
+        self.assertEqual(ids[0], "v0000000003")                   # re-play moved to the front
+        self.assertEqual([f for f in os.listdir(self._tmp) if f.startswith(".tmp-")], [])
+
+    def test_lyrics_cache_roundtrip_is_private(self):
+        orig = self.ytm.get_lyrics
+        self.ytm.get_lyrics = lambda *a, **k: {"ok": True, "synced": [{"t": 1, "line": "x"}],
+                                               "plain": "x"}
+        try:
+            self.ytm.cache_lyrics("abc", "t", "a")
+        finally:
+            self.ytm.get_lyrics = orig
+        self.assertTrue(self.ytm.cached_lyrics("abc")["ok"])
+        self.assertEqual(os.stat(os.path.join(self._tmp, "lyrics", "abc.json")).st_mode & 0o777, 0o600)
+
+
+class YtdlpVersionCache(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="ver-")
+        self.bin = os.path.join(self._tmp, "yt-dlp")
+        with open(self.bin, "w") as f:
+            f.write("x")
+        self._saved = (youfish._ytdlp_path, youfish._data_dir, youfish.subprocess.run)
+        youfish._ytdlp_path = lambda: self.bin
+        youfish._data_dir = lambda: self._tmp
+        self.runs = 0
+
+        def run(cmd, **kw):
+            self.runs += 1
+            return types.SimpleNamespace(returncode=0, stdout="2026.08.19\n", stderr="")
+        youfish.subprocess.run = run
+
+    def tearDown(self):
+        youfish._ytdlp_path, youfish._data_dir, youfish.subprocess.run = self._saved
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_version_remembered_per_binary(self):
+        self.assertEqual(youfish.ytdlp_version(), "2026.08.19")
+        self.assertEqual(youfish.ytdlp_version(), "2026.08.19")
+        self.assertEqual(self.runs, 1)                        # second launch: no spawn
+        youfish.ytdlp_version(fresh=True)
+        self.assertEqual(self.runs, 2)                        # install proves the binary runs
+        with open(self.bin, "w") as f:
+            f.write("updated binary")                         # an update changes the stat
+        youfish.ytdlp_version()
+        self.assertEqual(self.runs, 3)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

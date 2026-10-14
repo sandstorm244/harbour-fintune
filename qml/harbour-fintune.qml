@@ -37,6 +37,7 @@ ApplicationWindow {
     // re-fetched per track in startCurrentQueueItem.
     property var    npSponsorSegments: []
     property var    npManualSeg: null
+    property string npNormPending: ""       // track whose loudness waits on its resolve result
     property var    npLoudnessDb: null      // current track's YouTube loudnessDb (null = unknown)
 
     // Play queue — albums / playlists / mixes; a single-song tap is a 1-item queue so next/prev
@@ -51,6 +52,8 @@ ApplicationWindow {
     // the autoplay-continuation fetch; npFailStreak bounds auto-skipping so an all-failing queue
     // can't spin forever.
     property bool   radioLoading: false
+    property string radioTailSeed: ""       // last seed prefetchRadioTail asked about (don't re-ask)
+    property bool   radioTailAdvance: false // the queue ran dry while that fetch was still out
     property int    npFailStreak: 0
 
     // Repeat mode: 0 off (queue ends → song radio), 1 repeat-all (queue wraps to the top),
@@ -136,7 +139,7 @@ ApplicationWindow {
         onEqBandsChanged: app.applyAudio()
         onBoostGainChanged: app.applyAudio()
         // Toggling normalization mid-playback re-applies to the current track at once.
-        onNormalizeVolumeChanged: app.applyNormalization(app.npId)
+        onNormalizeVolumeChanged: app.applyNormalization(app.npId, app.npResolving ? null : app.npInfo)
         // Moving the max-boost knob recomputes from the stored level — no re-fetch.
         onNormMaxBoostDbChanged: app.reapplyNormGain()
     }
@@ -231,7 +234,7 @@ ApplicationWindow {
         app.npError = ""
         app.npReresolved = false               // fresh re-resolve budget for the new track
         app.loadSponsorSegments(it.videoId)    // SponsorBlock segments for this track (async/local)
-        app.applyNormalization(it.videoId)     // per-track loudness gain (async/local, unity if off)
+        app.applyNormalization(it.videoId, null)   // per-track loudness gain (local copy, else from the resolve)
         backend.musicRecordPlay(it)            // remember it in the play history
         player.stop()
         var localPath = app.localPathFor(it.videoId)
@@ -520,14 +523,27 @@ ApplicationWindow {
     // Set the player's per-track normalization gain: reset to unity first (so a track with no data
     // doesn't inherit the previous gain), then apply a cached or freshly-fetched loudnessDb. The
     // async result is guarded against the track having changed underneath us.
-    function applyNormalization(videoId) {
+    // `info` is the track's resolve result when we have it: the InnerTube fast path carries
+    // loudness_db in it, which saves the separate ytm.player_loudness request. With info == null
+    // (track start) the lookup is deferred to applyResolved() so that decision can be made there.
+    function applyNormalization(videoId, info) {
         app.npLoudnessDb = null                        // forget the previous track's level
         player.setNormGain(1.0)                        // reset per track
+        app.npNormPending = ""
         if (!backend.normalizeVolume || !videoId)
             return
         var localDb = app.localLoudnessDb(videoId)
         if (localDb !== undefined) {
             app.npLoudnessDb = localDb
+            app.reapplyNormGain()
+            return
+        }
+        if (info === null) {                           // resolve in flight → decide when it lands
+            app.npNormPending = videoId
+            return
+        }
+        if (info && typeof info.loudness_db === "number") {
+            app.npLoudnessDb = info.loudness_db
             app.reapplyNormGain()
             return
         }
@@ -734,6 +750,8 @@ ApplicationWindow {
     function applyResolved(info) {
         app.npResolving = false
         app.npInfo = info
+        if (app.npNormPending !== "" && app.npNormPending === app.npId)
+            app.applyNormalization(app.npId, info)     // loudness from the resolve, or the fallback fetch
         app.npAudioIdx = 0
         app.npTriedMuxed = false
         app.playCurrentStep()
@@ -743,15 +761,74 @@ ApplicationWindow {
     // instant. The engine dedups repeat prefetches, caches with a URL-expiry-derived TTL, and
     // runs on its own background thread — the UI's Python worker never blocks on this.
     function prefetchNext() {
+        app.prefetchRadioTail()
         if (!app.hasNext)
             return
-        var nx = app.playQueue[app.playQueueIndex + 1]
-        if (nx && nx.videoId)
+        // The track playNext() will actually land on: it hops over disliked ones when
+        // "skip disliked" is on, so warming the literal next entry would waste a resolve.
+        var idx = app.playQueueIndex + 1
+        if (backend.skipDisliked)
+            while (idx < app.playQueue.length && app.isDisliked(app.playQueue[idx].videoId))
+                idx += 1
+        var nx = app.playQueue[idx]
+        // A downloaded track plays from its local file and never resolves — nothing to warm.
+        if (nx && nx.videoId && !app.isDownloaded(nx.videoId))
             backend.prefetchResolve(nx.videoId)
+    }
+
+    // When the NEXT track is the last one in the queue, fetch its song radio now and append it
+    // (without advancing), so the queue already continues when that track starts — instead of
+    // paying a radio round-trip after the last track ends. Not under repeat-all / repeat-one (the
+    // queue wraps / replays, radio is never reached); remembered per seed so a radio that returns
+    // nothing new isn't re-asked on every prefetch.
+    function prefetchRadioTail() {
+        var n = app.playQueue.length
+        if (app.radioLoading || !backend.autoplay || app.repeatMode !== 0
+                || app.playQueueIndex < 0 || app.playQueueIndex + 2 !== n)
+            return
+        var seed = app.playQueue[n - 1].videoId
+        if (!seed || seed === app.radioTailSeed)
+            return
+        app.radioTailSeed = seed
+        app.radioTailAdvance = false
+        app.radioLoading = true
+        backend.musicRadio(seed, function(res) {
+            app.radioLoading = false
+            var advance = app.radioTailAdvance
+            app.radioTailAdvance = false
+            // The queue changed under the request (new queue, reorder, another append) → drop it.
+            if (app.playQueue.length !== n || app.playQueue[n - 1].videoId !== seed)
+                return
+            var tracks = (res && res.tracks) ? res.tracks : []
+            if (app.shuffle)
+                tracks = app.shuffledCopy(tracks)
+            var have = {}
+            for (var i = 0; i < app.playQueue.length; i++)
+                have[app.playQueue[i].videoId] = true
+            var q = app.playQueue.slice()
+            for (var j = 0; j < tracks.length; j++)
+                if (tracks[j].videoId && !have[tracks[j].videoId]
+                        && !(backend.skipDisliked && app.isDisliked(tracks[j].videoId))) {
+                    have[tracks[j].videoId] = true
+                    q.push(tracks[j])
+                }
+            if (q.length > app.playQueue.length) {
+                app.playQueue = q
+                if (advance) {                     // the last track already ended: carry on now
+                    app.playQueueIndex += 1
+                    app.startCurrentQueueItem(false)
+                }
+            }
+        })
     }
 
     // Queue ran dry → continue with the current track's song radio (YouTube Music autoplay).
     function startRadioContinuation() {
+        // The tail prefetch for this very track is still out: let its answer advance the queue.
+        if (app.radioLoading && app.npId && app.npId === app.radioTailSeed) {
+            app.radioTailAdvance = true
+            return
+        }
         if (app.radioLoading || !app.npId || !backend.autoplay)
             return
         app.radioLoading = true

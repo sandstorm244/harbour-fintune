@@ -73,6 +73,27 @@ def _log(msg):
 # Paths (FinTune's own data dir — separate from FinTube's)
 # --------------------------------------------------------------------------- #
 
+def _atomic_write_json(path, obj):
+    """Write obj as JSON to `path` atomically and privately: a 0600 temp file in the same directory
+    (mkstemp), then os.replace() over the target — atomic on POSIX, so a crash / battery-pull /
+    ENOSPC mid-write can never truncate a live store (a truncated store loads as empty and the next
+    save would persist the wipe). Same contract as youfish._atomic_write_json (this module can't
+    import it: youfish imports ytm). Raises on failure, leaving the existing file untouched."""
+    d = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".tmp-", dir=d)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(obj, f)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+        raise
+
+
 def _data_dir():
     d = os.path.expanduser("~/.local/share/" + _APP)
     try:
@@ -1228,8 +1249,7 @@ def get_home(max_shelves=25):
             shelves, fallback = fb, True
     if shelves:                                   # cache for an instant load next launch
         try:
-            with open(_home_cache_path(), "w") as f:
-                json.dump({"shelves": shelves, "logged_in": logged}, f)
+            _atomic_write_json(_home_cache_path(), {"shelves": shelves, "logged_in": logged})
         except Exception:
             pass
     return {"logged_in": logged, "shelves": shelves, "fallback": fallback}
@@ -1258,27 +1278,32 @@ def _play_history_path():
     return os.path.join(_data_dir(), "play_history.json")
 
 
+# Serialises record_play's read-modify-write (it runs on the per-track lane while the History page
+# and clear_play_history run on the main one — without this two writers lose each other's update).
+_history_lock = threading.Lock()
+
+
 def record_play(video_id, title="", subtitle="", thumb="", artist_id=""):
     """Append a played track to the music history (dedup-to-front on repeat)."""
     if not video_id:
         return
-    try:
-        with open(_play_history_path()) as f:
-            hist = json.load(f)
-        if not isinstance(hist, list):
+    with _history_lock:
+        try:
+            with open(_play_history_path()) as f:
+                hist = json.load(f)
+            if not isinstance(hist, list):
+                hist = []
+        except Exception:
             hist = []
-    except Exception:
-        hist = []
-    hist = [h for h in hist if isinstance(h, dict) and h.get("videoId") != video_id]
-    hist.append({"videoId": video_id, "title": title or video_id, "subtitle": subtitle or "",
-                 "thumb": thumb or "", "artistId": artist_id or "", "ts": int(time.time())})
-    if len(hist) > 400:
-        hist = hist[-400:]
-    try:
-        with open(_play_history_path(), "w") as f:
-            json.dump(hist, f)
-    except Exception:
-        pass
+        hist = [h for h in hist if isinstance(h, dict) and h.get("videoId") != video_id]
+        hist.append({"videoId": video_id, "title": title or video_id, "subtitle": subtitle or "",
+                     "thumb": thumb or "", "artistId": artist_id or "", "ts": int(time.time())})
+        if len(hist) > 400:
+            hist = hist[-400:]
+        try:
+            _atomic_write_json(_play_history_path(), hist)
+        except Exception:
+            pass
 
 
 def play_history(limit=200):
@@ -1296,12 +1321,13 @@ def play_history(limit=200):
 
 
 def clear_play_history():
-    try:
-        p = _play_history_path()
-        if os.path.exists(p):
-            os.remove(p)
-    except Exception:
-        pass
+    with _history_lock:
+        try:
+            p = _play_history_path()
+            if os.path.exists(p):
+                os.remove(p)
+        except Exception:
+            pass
     return {"ok": True}
 
 
@@ -1320,8 +1346,7 @@ def _load_disliked():
 
 def _save_disliked(s):
     try:
-        with open(_disliked_path(), "w") as f:
-            json.dump(sorted(s), f)
+        _atomic_write_json(_disliked_path(), sorted(s))
     except Exception:
         pass
 
@@ -1437,6 +1462,42 @@ def _header_artist(data):
     return "", ""
 
 
+_PLAYLIST_MAX_PAGES = 60      # ~6000 rows; a hard stop on a pathological continuation chain
+
+
+def _cont_token_of(items, conts):
+    """Continuation token from a shelf's trailing continuationItemRenderer (new style) or its
+    `continuations` list (old style), else None."""
+    for it in reversed(items or []):
+        if isinstance(it, dict) and "continuationItemRenderer" in it:
+            t = _nav(it, ["continuationItemRenderer", "continuationEndpoint",
+                          "continuationCommand", "token"])
+            if t:
+                return t
+            break
+    return (_nav(conts, [0, "nextContinuationData", "continuation"])
+            or _nav(conts, [0, "reloadContinuationData", "continuation"]))
+
+
+def _playlist_token(data):
+    """The TRACK-list continuation of a playlist browse response (first page or continuation).
+    Looks only at the playlist shelf itself — the section list around it carries a second token for
+    the 'related' area that must not be followed."""
+    shelves = []
+    _collect_renderers(data, "musicPlaylistShelfRenderer", shelves)
+    _collect_renderers(data, "musicPlaylistShelfContinuation", shelves)
+    for sh in shelves:
+        t = _cont_token_of(sh.get("contents"), sh.get("continuations"))
+        if t:
+            return t
+    for act in (data.get("onResponseReceivedActions") or []):   # continuation pages: items appended
+        items = _nav(act, ["appendContinuationItemsAction", "continuationItems"])
+        t = _cont_token_of(items, None)
+        if t:
+            return t
+    return None
+
+
 def get_playlist(browse_id, limit=200, params=""):
     """Tracks of a playlist / album / mix / artist page (works logged out for public ones;
     signed-in for your own). Layout-robust: deep-collect the track rows. `params` supports the
@@ -1457,21 +1518,43 @@ def get_playlist(browse_id, limit=200, params=""):
     header_thumb = _header_thumb(data)                 # album cover — track rows omit their own
     header_artist, header_artist_id = _header_artist(data)
     tracks, seen = [], set()
-    for r in rows:
-        it = _parse_responsive(r)
-        vid = it.get("videoId")
-        if vid and vid not in seen:
-            if not it.get("thumb"):
-                it["thumb"] = header_thumb             # fall back to the album/playlist cover
-            if not it.get("subtitle"):
-                it["subtitle"] = header_artist
-            if not it.get("artistId"):
-                it["artistId"] = header_artist_id
-            seen.add(vid)
-            tracks.append(it)
-        if len(tracks) >= limit:
+
+    def add_rows(batch):
+        for r in batch:
+            if len(tracks) >= limit:
+                return
+            it = _parse_responsive(r)
+            vid = it.get("videoId")
+            if vid and vid not in seen:
+                if not it.get("thumb"):
+                    it["thumb"] = header_thumb         # fall back to the album/playlist cover
+                if not it.get("subtitle"):
+                    it["subtitle"] = header_artist
+                if not it.get("artistId"):
+                    it["artistId"] = header_artist_id
+                seen.add(vid)
+                tracks.append(it)
+    add_rows(rows)
+    # A page holds ~100 rows; big playlists / Liked Songs continue via a token on the shelf. Follow
+    # it until `limit`, the end, or a page that adds nothing (guards against a token loop).
+    token = _playlist_token(data)
+    pages = 1
+    while token and len(tracks) < limit and pages < _PLAYLIST_MAX_PAGES:
+        try:
+            cdata = _innertube("browse", {"continuation": token})
+        except Exception as ex:
+            _log("get_playlist %s continuation failed: %s" % (browse_id, ex))
             break
-    _log("get_playlist %s: rows=%d tracks=%d" % (browse_id, len(rows), len(tracks)))
+        before = len(tracks)
+        crows = []
+        _collect_renderers(cdata, "musicResponsiveListItemRenderer", crows)
+        add_rows(crows)
+        pages += 1
+        rows = rows + crows
+        if len(tracks) == before:
+            break
+        token = _playlist_token(cdata)
+    _log("get_playlist %s: rows=%d tracks=%d pages=%d" % (browse_id, len(rows), len(tracks), pages))
     return {"ok": True, "title": _header_title(data), "tracks": tracks}
 
 
@@ -1705,9 +1788,9 @@ def cache_lyrics(video_id, title, artist, duration_sec=0, album=""):
     res = get_lyrics(title, artist, duration_sec, album)
     if res.get("ok"):
         try:
-            with open(_lyrics_cache_path(video_id), "w") as f:
-                json.dump({"synced": res.get("synced") or [], "plain": res.get("plain") or "",
-                           "instrumental": bool(res.get("instrumental"))}, f)
+            _atomic_write_json(_lyrics_cache_path(video_id),
+                               {"synced": res.get("synced") or [], "plain": res.get("plain") or "",
+                                "instrumental": bool(res.get("instrumental"))})
         except Exception:
             pass
     return res

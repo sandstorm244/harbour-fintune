@@ -56,6 +56,7 @@ DISTFILES += \
     qml/pages/AccountsPage.qml \
     qml/cover/CoverPage.qml \
     python/youfish.py \
+    python/innertube.py \
     python/ytm.py \
     harbour-fintune.desktop \
     harbour.fintune.service \
