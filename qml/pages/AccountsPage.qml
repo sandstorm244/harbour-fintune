@@ -33,7 +33,22 @@ Page {
             MenuItem { text: "Reload"; onClicked: page.reload() }
         }
 
-        header: PageHeader { title: "Account" }
+        header: Column {
+            width: parent.width
+            PageHeader { title: "Account" }
+            Label {
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * Theme.horizontalPageMargin
+                bottomPadding: Theme.paddingMedium
+                // With accounts listed the placeholder is hidden, so a failed switch or reload
+                // shows its error here instead of looking like the tap did nothing.
+                visible: page.errorText.length > 0 && app.backend.ytmAccounts.length > 0
+                wrapMode: Text.Wrap
+                text: page.errorText
+                color: Theme.errorColor
+                font.pixelSize: Theme.fontSizeExtraSmall
+            }
+        }
 
         delegate: ListItem {
             id: item
@@ -78,12 +93,15 @@ Page {
                 }
             }
 
-            onClicked: app.backend.ytmSelectAccount(modelData, function(res) {
-                if (res && res.ok)
-                    pageStack.pop()
-                else
-                    page.errorText = (res && res.error) ? res.error : "Couldn't switch account."
-            })
+            onClicked: {
+                page.errorText = ""
+                app.backend.ytmSelectAccount(modelData, function(res) {
+                    if (res && res.ok)
+                        pageStack.pop()
+                    else
+                        page.errorText = (res && res.error) ? res.error : "Couldn't switch account."
+                })
+            }
         }
 
         ViewPlaceholder {
