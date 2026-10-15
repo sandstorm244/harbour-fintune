@@ -143,7 +143,10 @@ python3 python/test_youfish.py   # offline engine tests — pure stdlib, externa
    **`tv_embedded` is gone.** yt-dlp removed it in 2026.01.31 and silently skips unknown
    names; `_token_free_client` (`:3535`) now follows the installed yt-dlp's JS-less default
    (visionos) via `innertube.player_client()`, and `_default_client:3590`, the token-free
-   probe gate in `_resolve_uncached` and the logs all use it.
+   probe gate in `_resolve_uncached` and the logs all use it. A run that carries login cookies
+   (the download, the cookie'd re-resolve) must not name it: yt-dlp drops every client without
+   cookie support (visionos, android, ios) and fails with none left, so
+   `_yt_extractor_args(cookies=True)` leaves the client to yt-dlp's signed-in default.
 
 4. **`PR_SET_PDEATHSIG` is thread-scoped, not process-scoped.** The Deno PO-token sidecar
    MUST be spawned from a dedicated long-lived owner thread that parks on `proc.wait()`
