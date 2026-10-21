@@ -258,7 +258,9 @@ python3 python/test_youfish.py   # offline engine tests — pure stdlib, externa
 **Metadata engine (`python/ytm.py`)** — this file has no FinTube equivalent at this size;
 by line:
 - Identity/auth: `_fetch_ytm_identity:202`, `_ytm_config:188` (`_YTM_CFG_TTL:167` TTL const),
-  `_warm_ytm_config:225`, `_auth_mode:831`, `_innertube:293` (mode branching),
+  `_warm_ytm_config:225`, `_auth_mode:831`, `_innertube:293` (mode branching; sent through
+  `innertube.request`'s keep-alive pool, urllib only without the module — a refusal is re-raised
+  as the same `urllib.error.HTTPError`, and `_Headers` feeds `_absorb_rotations`),
   `verify_session:395-432`.
 - Cookie handling: `_read_cookie_jar:594` (copies Gecko `cookies.sqlite` to a temp file so a
   live browser's WAL lock never blocks the read), `_absorb_rotations:711`,

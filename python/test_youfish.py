@@ -2466,6 +2466,86 @@ class YtmSweepFixes(unittest.TestCase):
         self.assertFalse(os.path.exists(self.ytm._tokens_path()))
 
 
+class YtmPooledTransport(unittest.TestCase):
+    """ytm._innertube on innertube.request (the keep-alive pool): same answers, same HTTPError on a
+    refusal, and Set-Cookie rotations still reach the store."""
+
+    def setUp(self):
+        import ytm
+        import http.client
+        self.ytm = ytm
+        self.saved = dict((n, getattr(ytm, n)) for n in (
+            "_ytm_config", "_context", "_auth_mode", "_load_cookies", "_selected_identity",
+            "_visitor_id_cached", "_persist_rotations", "_warm_ytm_config", "_log"))
+        self.logged = []
+        ytm._log = lambda m: self.logged.append(m)
+        self.saved_req = innertube.request
+        ytm._ytm_config = lambda: {"key": "K"}
+        ytm._context = lambda: {"client": {}}
+        ytm._auth_mode = lambda: "cookie"
+        ytm._load_cookies = lambda: {"cookie": "SID=a", "sapisid": "s"}
+        ytm._selected_identity = lambda: {"authuser": "0", "page_id": ""}
+        ytm._visitor_id_cached = lambda: "V"
+        ytm._warm_ytm_config = lambda: None
+        self.rotated = []
+        ytm._persist_rotations = lambda u: self.rotated.append(u)
+        self.calls = []
+        self.reply = (200, b'{"ok": 1}', http.client.HTTPMessage())
+
+        def fake(method, url, body=None, headers=None, timeout=10):
+            self.calls.append((method, url, json.loads(body.decode()), headers))
+            return self.reply
+        innertube.request = fake
+
+    def tearDown(self):
+        for n, v in self.saved.items():
+            setattr(self.ytm, n, v)
+        innertube.request = self.saved_req
+
+    def test_answer_comes_from_the_pool(self):
+        self.assertEqual(self.ytm._innertube("browse", {"browseId": "FEmusic_home"}), {"ok": 1})
+        method, url, payload, headers = self.calls[0]
+        self.assertEqual(method, "POST")
+        self.assertIn("/youtubei/v1/browse?key=K", url)
+        self.assertEqual(payload["browseId"], "FEmusic_home")
+        self.assertTrue(headers["Authorization"].startswith("SAPISIDHASH"))
+        self.assertEqual(self.rotated, [])
+
+    def test_refusal_raises_the_same_http_error(self):
+        import http.client
+        import urllib.error
+        h = http.client.HTTPMessage()
+        h["Content-Encoding"] = "gzip"            # the pool already gunzipped the body
+        self.reply = (401, b'{"error": "nope"}', h)
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            self.ytm._innertube("browse", {})
+        self.assertEqual(cm.exception.code, 401)
+        self.assertEqual(str(cm.exception), "HTTP Error 401: Unauthorized")
+        # The handler logs the error body (as before): plain text, not a failed gunzip.
+        self.assertIn('{"error": "nope"}', " ".join(self.logged))
+
+    def test_rotated_cookies_are_absorbed(self):
+        import http.client
+        h = http.client.HTTPMessage()
+        h["Set-Cookie"] = "SIDCC=new1; Domain=.youtube.com; Path=/; Secure"
+        h["Set-Cookie"] = "__Secure-3PSIDCC=new2; Domain=.youtube.com; Path=/; Secure"
+        self.reply = (200, b"{}", h)
+        self.ytm._innertube("next", {})
+        self.assertEqual(self.rotated, [{"SIDCC": "new1", "__Secure-3PSIDCC": "new2"}])
+
+    def test_falls_back_to_urllib_without_the_pool(self):
+        self.ytm_pool = self.ytm._pool
+        self.ytm._pool = lambda: None
+        orig = self.ytm.urllib.request.urlopen
+        self.ytm.urllib.request.urlopen = lambda *a, **k: YtmIdentity._Resp('{"via": "urllib"}')
+        try:
+            self.assertEqual(self.ytm._innertube("browse", {}), {"via": "urllib"})
+        finally:
+            self.ytm.urllib.request.urlopen = orig
+            self.ytm._pool = self.ytm_pool
+        self.assertEqual(self.calls, [])
+
+
 class YtmAtomicStores(unittest.TestCase):
     def setUp(self):
         import ytm

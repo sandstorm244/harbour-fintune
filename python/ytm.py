@@ -19,7 +19,9 @@ unauthenticated search/browse path does not depend on any of it.
 
 import gzip
 import hashlib
+import http.client
 import http.cookiejar
+import io
 import json
 import os
 import re
@@ -298,6 +300,24 @@ def _context(auth=False):
     return ctx
 
 
+def _pool():
+    """innertube.py's keep-alive pool (its request()), or None when the module isn't there."""
+    try:
+        import innertube
+        return innertube if hasattr(innertube, "request") else None
+    except Exception:
+        return None
+
+
+class _Headers(object):
+    """Pooled response headers dressed as the response object _absorb_rotations expects."""
+    def __init__(self, msg):
+        self.headers = msg
+
+    def info(self):
+        return self.headers
+
+
 def _innertube(endpoint, body, use_auth=True, timeout=30, authuser=None, page_id=None):
     """POST an InnerTube endpoint. When `use_auth`, authenticates with the imported browser
     cookies (SAPISIDHASH) if present, else an OAuth Bearer token if present; otherwise makes an
@@ -351,7 +371,22 @@ def _innertube(endpoint, body, use_auth=True, timeout=30, authuser=None, page_id
     else:
         url = _INNERTUBE + endpoint + "?key=" + _ytm_config()["key"] + "&prettyPrint=false"
     req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers)
+    pool = _pool()
     try:
+        if pool is not None:
+            # Keep-alive: every browse/search/next after the first skips the TLS handshake.
+            status, raw, rh = pool.request("POST", url, req.data, headers, timeout)
+            if not 200 <= status < 300:
+                # Same exception urlopen raised, so callers and str(ex) don't change. raw is
+                # already gunzipped, so the copy handed on carries no Content-Encoding.
+                rh = rh or http.client.HTTPMessage()
+                del rh["Content-Encoding"]
+                raise urllib.error.HTTPError(url, status, http.client.responses.get(status, ""),
+                                             rh, io.BytesIO(raw))
+            data = json.loads(raw.decode())
+            if mode == "cookie":
+                _absorb_rotations(_Headers(rh), req)
+            return data
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(_read_body(resp).decode())
             if mode == "cookie":
