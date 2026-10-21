@@ -81,6 +81,23 @@ yt-dlp needed:
 python3 python/test_youfish.py
 ```
 
+## Translating
+
+Translations are welcome.
+
+1. Copy `translations/harbour-fintune.ts` (the up-to-date list of every string in the app) to
+   `translations/harbour-fintune-<lang>.ts`, e.g. `harbour-fintune-de.ts` or `harbour-fintune-pt_BR.ts`.
+2. Open it in [Qt Linguist](https://doc.qt.io/qt-5/linguist-translators.html) (package `qt5-linguist`
+   / `qttools5-dev-tools`; any text editor works too) and set the target language
+   (*Edit → Translation File Settings*). Translate, marking each string done (✓).
+   `%1`, `%2` are placeholders — keep them. Strings with `%n` have a form per plural.
+3. Add the file to `TRANSLATIONS` in `harbour-fintune.pro` and open a pull request (or attach the
+   file to an issue).
+
+Untranslated or unfinished strings fall back to English, so a partial translation is fine. The
+build refreshes every `.ts` file automatically when strings change. Messages that come from the
+engine itself (YouTube/yt-dlp errors, the diagnostics report) stay in English.
+
 ## License
 
 GNU General Public License v3

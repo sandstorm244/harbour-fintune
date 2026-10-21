@@ -18,10 +18,11 @@ Page {
         page.errorText = ""
         app.backend.musicLibrary(function(res) {
             page.loading = false
-            if (res && res.logged_in)
-                page.playlists = res.playlists || []
-            else if (res && res.error)
+            // error first: a failed load comes back logged_in:true with an error + no playlists
+            if (res && res.error)
                 page.errorText = res.error
+            else if (res && res.logged_in)
+                page.playlists = res.playlists || []
         })
     }
 
@@ -38,7 +39,7 @@ Page {
 
         header: Column {
             width: list.width
-            PageHeader { title: "Library" }
+            PageHeader { title: qsTr("Library") }
             BusyIndicator {
                 anchors.horizontalCenter: parent.horizontalCenter
                 size: BusyIndicatorSize.Large
@@ -108,8 +109,8 @@ Page {
 
         ViewPlaceholder {
             enabled: !app.backend.ytmLoggedIn
-            text: "Sign in to see your library"
-            hintText: "Settings → Account → Import from browser"
+            text: qsTr("Sign in to see your library")
+            hintText: qsTr("Settings → Account → Import from browser")
         }
 
         VerticalScrollDecorator { }

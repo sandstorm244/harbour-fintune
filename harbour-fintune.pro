@@ -3,7 +3,7 @@
 
 TARGET = harbour-fintune
 
-CONFIG += sailfishapp link_pkgconfig
+CONFIG += sailfishapp sailfishapp_i18n link_pkgconfig
 # Hardware-decode path (droideglsink -> EGLImage -> GL_TEXTURE_EXTERNAL_OES): egl for the
 # EGLImage/display calls, nemo-gstreamer-interfaces for nemo_gst_egl_image_memory_create_image.
 # QT += opengl pulls in both the legacy QGLShaderProgram the renderer uses and the GLESv2
@@ -60,7 +60,16 @@ DISTFILES += \
     python/ytm.py \
     harbour-fintune.desktop \
     harbour.fintune.service \
-    rpm/harbour-fintune.spec
+    rpm/harbour-fintune.spec \
+    translations/*.ts
+
+# Translations. sailfishapp_i18n runs lupdate over qml/ and src/ at build time, which refreshes
+# the template translations/harbour-fintune.ts (what translators copy) and every file listed
+# below, then lrelease turns each listed file into a .qm under /usr/share/harbour-fintune/
+# translations. Unfinished strings are left out, so they fall back to English.
+# The -en file is not a translation: it only holds English plural forms (see main()).
+# To add a language: copy the template to translations/harbour-fintune-<lang>.ts, add it here.
+TRANSLATIONS += translations/harbour-fintune-en.ts
 
 # Ship the Python backend alongside the QML. sailfishapp.prf already installs the
 # qml/ tree and the .desktop file; this adds our python/ module.

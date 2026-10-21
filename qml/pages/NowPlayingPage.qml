@@ -74,7 +74,7 @@ Page {
 
         PullDownMenu {
             MenuItem {
-                text: app.isDownloaded(app.npId) ? "Remove download" : "Download"
+                text: app.isDownloaded(app.npId) ? qsTr("Remove download") : qsTr("Download")
                 enabled: app.npId.length > 0
                 onClicked: app.isDownloaded(app.npId)
                            ? app.backend.deleteDownload(app.npId, "audio")
@@ -83,23 +83,25 @@ Page {
                                  artistId: app.npArtistId })
             }
             MenuItem {
-                text: "Add to playlist"
+                text: qsTr("Add to playlist")
                 enabled: app.npId.length > 0
                 onClicked: app.addToPlaylist({ videoId: app.npId, title: app.npTitle,
                     subtitle: app.npArtist, thumb: app.npThumb, artistId: app.npArtistId })
             }
             MenuItem {
-                text: "Lyrics"
+                //: Song lyrics
+                text: qsTr("Lyrics")
                 enabled: app.npId.length > 0
                 onClicked: pageStack.push(Qt.resolvedUrl("LyricsPage.qml"))
             }
             MenuItem {
-                text: "Up next"
+                //: The upcoming playback queue
+                text: qsTr("Up next")
                 onClicked: pageStack.push(Qt.resolvedUrl("QueuePage.qml"))
             }
         }
 
-        PageHeader { id: header; title: "Now Playing" }
+        PageHeader { id: header; title: qsTr("Now Playing") }
 
         // --- Bottom cluster: error, seek bar, times, transport (pinned to the bottom) ---
         Column {

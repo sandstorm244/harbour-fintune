@@ -17,7 +17,7 @@ Page {
     property string loadedFor: ""     // videoId the current lyrics belong to
 
     function load() {
-        if (!app.npId) { page.loading = false; page.errorText = "Nothing playing."; return }
+        if (!app.npId) { page.loading = false; page.errorText = qsTr("Nothing playing."); return }
         page.loading = true
         page.errorText = ""
         page.synced = []
@@ -38,7 +38,7 @@ Page {
                 page.instrumental = !!res.instrumental
                 page.updateCurrent()
             } else {
-                page.errorText = (res && res.error) ? res.error : "No lyrics found."
+                page.errorText = (res && res.error) ? res.error : qsTr("No lyrics found.")
             }
         })
     }
@@ -76,7 +76,7 @@ Page {
         anchors.fill: parent
         visible: page.synced.length > 0
         bottomMargin: app.npActive ? Theme.itemSizeMedium : 0
-        header: PageHeader { title: "Lyrics" }
+        header: PageHeader { title: qsTr("Lyrics") }
         model: page.synced
 
         delegate: BackgroundItem {
@@ -118,7 +118,7 @@ Page {
             width: parent.width
             spacing: Theme.paddingLarge
 
-            PageHeader { title: "Lyrics" }
+            PageHeader { title: qsTr("Lyrics") }
 
             BusyIndicator {
                 anchors.horizontalCenter: parent.horizontalCenter
@@ -140,9 +140,9 @@ Page {
 
         ViewPlaceholder {
             enabled: !page.loading && page.plain.length === 0
-            text: page.instrumental ? "Instrumental"
-                  : (page.errorText.length > 0 ? page.errorText : "No lyrics")
-            hintText: page.instrumental ? "" : "Lyrics come from LRCLIB — not every track has them."
+            text: page.instrumental ? qsTr("Instrumental")
+                  : (page.errorText.length > 0 ? page.errorText : qsTr("No lyrics"))
+            hintText: page.instrumental ? "" : qsTr("Lyrics come from LRCLIB — not every track has them.")
         }
 
         VerticalScrollDecorator { }

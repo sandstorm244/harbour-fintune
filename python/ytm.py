@@ -189,6 +189,9 @@ _YTM_CFG_TTL = 12 * 3600            # re-scrape the live identity at most this o
 _ytm_cfg_cache = None              # in-memory {"key","version","ts"}
 _ytm_cfg_lock = threading.Lock()
 _ytm_cfg_warming = False
+# When the last scrape started: a failed one (consent page, layout change, no network) leaves
+# the cache stale, and without this every request would re-download the homepage.
+_ytm_cfg_last_try = 0.0
 
 
 def _ytm_config_path():
@@ -245,11 +248,12 @@ def _fetch_ytm_identity(timeout=15):
 
 def _warm_ytm_config():
     """Refresh the cached identity from the live site, in the background (deduped)."""
-    global _ytm_cfg_warming
+    global _ytm_cfg_warming, _ytm_cfg_last_try
     with _ytm_cfg_lock:
-        if _ytm_cfg_warming:
+        if _ytm_cfg_warming or time.time() - _ytm_cfg_last_try < 600:
             return
         _ytm_cfg_warming = True
+        _ytm_cfg_last_try = time.time()
 
     def _bg():
         global _ytm_cfg_cache, _ytm_cfg_warming
@@ -258,8 +262,7 @@ def _warm_ytm_config():
             if ver:      # the version is the part that drifts; only commit when we actually got one
                 cfg = {"key": key or _DEFAULT_INNERTUBE_KEY, "version": ver, "ts": time.time()}
                 try:
-                    with open(_ytm_config_path(), "w") as f:
-                        json.dump(cfg, f)
+                    _atomic_write_json(_ytm_config_path(), cfg)
                 except Exception:
                     pass
                 _ytm_cfg_cache = cfg
@@ -382,13 +385,14 @@ def _load_tokens():
         return {}
 
 
-def _save_tokens(t):
+def _save_tokens(t, only_if_current=False):
+    """Atomic + 0600 (OAuth refresh token). only_if_current: a token refresh that raced a logout
+    or a re-login must not write the old session back."""
     with _tokens_lock:
         try:
-            path = _tokens_path()
-            with open(path, "w") as f:
-                json.dump(t, f)
-            os.chmod(path, 0o600)     # OAuth refresh token — owner-only
+            if only_if_current and _load_tokens().get("refresh_token") != t.get("refresh_token"):
+                return
+            _atomic_write_json(_tokens_path(), t)
         except Exception:
             pass
 
@@ -398,11 +402,15 @@ def is_logged_in():
 
 
 def logout():
-    for p in (_tokens_path(), _cookies_path()):
-        try:
-            os.remove(p)
-        except Exception:
-            pass
+    # Under both store locks: a cookie rotation or token refresh in flight finishes first, then
+    # finds nothing to update, instead of writing the session back after it was removed.
+    # The home cache holds the old account's personalised shelves (select_account drops it too).
+    with _cookies_lock, _tokens_lock:
+        for p in (_tokens_path(), _cookies_path(), _home_cache_path()):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
     return {"logged_in": False}
 
 
@@ -475,7 +483,7 @@ def _access_token():
         return None
     t["access_token"] = r["access_token"]
     t["expires_at"] = time.time() + int(r.get("expires_in", 3600))
-    _save_tokens(t)
+    _save_tokens(t, only_if_current=True)
     return t["access_token"]
 
 
@@ -616,9 +624,12 @@ def _read_cookie_jar(path):
     """Read google/youtube cookie rows from a Firefox/Gecko cookies.sqlite. Returns a list of
     (name, value, host, cpath, expiry, secure). Copies the DB first so a running browser's
     lock/WAL doesn't block us."""
-    tmp = None
+    tmpdir = None
     try:
-        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False).name
+        # A private (0700) directory: the copy, its -wal/-shm and anything SQLite adds next to
+        # them hold live login cookies, and copyfile creates files with the default umask.
+        tmpdir = tempfile.mkdtemp(prefix="cookies-")
+        tmp = os.path.join(tmpdir, "cookies.sqlite")
         shutil.copyfile(path, tmp)
         for ext in ("-wal", "-shm"):     # bring recent writes (a fresh login) along
             if os.path.exists(path + ext):
@@ -635,11 +646,8 @@ def _read_cookie_jar(path):
         _log("cookie read failed (%s): %s" % (path, ex))
         return []
     finally:
-        for p in ((tmp, tmp + "-wal", tmp + "-shm") if tmp else ()):
-            try:
-                os.remove(p)
-            except Exception:
-                pass
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _netscape_from_rows(rows):
@@ -771,9 +779,10 @@ def import_browser_login():
     # Store everything in the single 0600 cookie file: the Cookie header + SAPISID for InnerTube
     # auth, and the Netscape text for yt-dlp (age-gated tracks, fewer 403s) — the latter is only
     # ever materialised to an ephemeral file by the engine, never persisted as plaintext.
-    _save_cookies({"cookie": cookie_header, "sapisid": sapisid,
-                   "ytdlp": _netscape_from_rows(rows),
-                   "source": used, "imported_at": int(time.time())})
+    with _cookies_lock:   # so an in-flight rotation of the OLD session can't overwrite this one
+        _save_cookies({"cookie": cookie_header, "sapisid": sapisid,
+                       "ytdlp": _netscape_from_rows(rows),
+                       "source": used, "imported_at": int(time.time())})
     _log("imported %d cookies (%d rows) from %s" % (len(pairs), len(rows), used))
     # VALIDATE the session we just stored — importing cookies that Google already rejects is the
     # exact trap behind "I re-imported but nothing changed". Only downgrade to live=False on a
@@ -1117,6 +1126,19 @@ def _parse_two_row(item):
     return tgt
 
 
+def _parse_card(card):
+    """musicCardShelfRenderer — the "Top result" card above search results (an artist, album or
+    song). Its target is the title run's endpoint, like a two-row card's."""
+    tgt = _endpoint_target(_nav(card, ["title", "runs", 0, "navigationEndpoint"], {}))
+    tgt.update({
+        "title": _runs_text(_nav(card, ["title"], {})),
+        "subtitle": _runs_text(_nav(card, ["subtitle"], {})),
+        "thumb": _best_thumb(_nav(card, ["thumbnail"], {})),
+        "artistId": _artist_id_from_runs(_nav(card, ["subtitle"], {})),
+    })
+    return tgt
+
+
 def _parse_responsive(item):
     """musicResponsiveListItemRenderer — the row shape (search results, lists)."""
     cols = _nav(item, ["flexColumns"], [])
@@ -1140,6 +1162,19 @@ def _parse_responsive(item):
     else:
         out.update(_endpoint_target(_nav(item, ["navigationEndpoint"], {})))
     return out
+
+
+def _parse_episode(item):
+    """musicMultiRowListItemRenderer — a podcast episode row (title, "46K views • 20h ago",
+    a length under playbackProgress)."""
+    length = _runs_text(_nav(item, ["playbackProgress", "musicPlaybackProgressRenderer",
+                                    "durationText"], {})).strip(" •")
+    sub = _runs_text(_nav(item, ["subtitle"], {}))
+    return {"kind": "song",
+            "videoId": _nav(item, ["onTap", "watchEndpoint", "videoId"], ""),
+            "title": _runs_text(_nav(item, ["title"], {})),
+            "subtitle": " • ".join(x for x in (sub, length) if x),
+            "thumb": _best_thumb(_nav(item, ["thumbnail"], {}))}
 
 
 def _parse_shelf_items(contents):
@@ -1402,9 +1437,13 @@ def search(query, limit=40):
         return {"items": [], "error": str(ex)}
     rows = []
     _collect_renderers(data, "musicResponsiveListItemRenderer", rows)
+    # The "Top result" card is the searched artist/album itself (Radiohead for "radiohead"); its
+    # own rows are collected above, but the card's subject is not a row, so lead with it.
+    cards = []
+    _collect_renderers(data, "musicCardShelfRenderer", cards)
+    lead = [_parse_card(c) for c in cards[:1]]
     items, seen = [], set()
-    for r in rows:
-        it = _parse_responsive(r)
+    for it in lead + [_parse_responsive(r) for r in rows]:
         key = it.get("videoId") or it.get("browseId")
         if not key or key in seen:
             continue
@@ -1515,6 +1554,7 @@ def get_playlist(browse_id, limit=200, params=""):
         return {"ok": False, "error": str(ex), "tracks": []}
     rows = []
     _collect_renderers(data, "musicResponsiveListItemRenderer", rows)
+    _collect_renderers(data, "musicMultiRowListItemRenderer", rows)   # a podcast's episodes
     header_thumb = _header_thumb(data)                 # album cover — track rows omit their own
     header_artist, header_artist_id = _header_artist(data)
     tracks, seen = [], set()
@@ -1523,7 +1563,7 @@ def get_playlist(browse_id, limit=200, params=""):
         for r in batch:
             if len(tracks) >= limit:
                 return
-            it = _parse_responsive(r)
+            it = _parse_responsive(r) if "flexColumns" in r else _parse_episode(r)
             vid = it.get("videoId")
             if vid and vid not in seen:
                 if not it.get("thumb"):
@@ -1548,6 +1588,7 @@ def get_playlist(browse_id, limit=200, params=""):
         before = len(tracks)
         crows = []
         _collect_renderers(cdata, "musicResponsiveListItemRenderer", crows)
+        _collect_renderers(cdata, "musicMultiRowListItemRenderer", crows)
         add_rows(crows)
         pages += 1
         rows = rows + crows
@@ -1650,6 +1691,19 @@ def get_radio(video_id, limit=25):
     return {"tracks": tracks}
 
 
+def _fast_player_loudness(video_id):
+    """loudnessDb from the engine's InnerTube player client, or None. Signed out, the WEB_REMIX
+    /player below answers "The page needs to be reloaded" with no audioConfig, so without this
+    normalization only worked when resolve's own fast path had carried the figure."""
+    try:
+        import youfish
+        it = youfish._it()
+        return youfish._loudness_db(it.player_info(video_id)) if it is not None else None
+    except Exception as ex:
+        _log("player_loudness %s via innertube: %s" % (video_id, ex))
+        return None
+
+
 def player_loudness(video_id):
     """Per-track loudness for volume normalization, read from InnerTube /player:
     playerConfig.audioConfig.loudnessDb — dB relative to YouTube's normalization target (positive
@@ -1661,6 +1715,9 @@ def player_loudness(video_id):
     the caller then leaves the playback gain at unity (no normalization for that track)."""
     if not video_id:
         return {"ok": True, "loudness_db": None}
+    db = _fast_player_loudness(video_id)
+    if db is not None:
+        return {"ok": True, "loudness_db": db}
     body = {"videoId": video_id, "contentCheckOk": True, "racyCheckOk": True}
     try:
         data = _innertube("player", body)
@@ -1713,8 +1770,10 @@ def _parse_lrc(text):
 def _lyrics_result(data):
     synced = _parse_lrc(data.get("syncedLyrics") or "")
     plain = data.get("plainLyrics") or ""
-    return {"ok": bool(synced or plain), "synced": synced, "plain": plain,
-            "instrumental": bool(data.get("instrumental"))}
+    instrumental = bool(data.get("instrumental"))
+    # An instrumental entry has no text but is still an answer: the page shows "Instrumental".
+    return {"ok": bool(synced or plain or instrumental), "synced": synced, "plain": plain,
+            "instrumental": instrumental}
 
 
 def _best_lyrics_match(arr, dur):
@@ -1723,7 +1782,8 @@ def _best_lyrics_match(arr, dur):
         return None
     def score(e):
         d = abs((e.get("duration") or 0) - dur) if dur else 0
-        return (0 if e.get("syncedLyrics") else 1, d)
+        text = 0 if e.get("syncedLyrics") else 1 if e.get("plainLyrics") else 2
+        return (text, d)
     return sorted(arr, key=score)[0]
 
 
@@ -1742,7 +1802,9 @@ def get_lyrics(title, artist, duration_sec=0, album=""):
         try:
             qs = urllib.parse.urlencode({"artist_name": artist_clean, "track_name": title,
                                          "album_name": album or title, "duration": dur})
-            return _lyrics_result(_http_get_json(_LRCLIB + "/get?" + qs))
+            res = _lyrics_result(_http_get_json(_LRCLIB + "/get?" + qs))
+            if res["ok"]:
+                return res              # an empty entry: the search below may have the text
         except urllib.error.HTTPError as he:
             if he.code != 404:
                 _log("lyrics get failed: %s" % he.code)

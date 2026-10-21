@@ -54,14 +54,14 @@ Page {
         if (status === PageStatus.Active && !_moreAttached) {
             _moreAttached = true
             pageStack.pushAttached(Qt.resolvedUrl("MorePage.qml"), {
-                heading: "More",
+                heading: qsTr("More"),
                 entries: [
-                    { title: "Library", desc: "Playlists + Liked Music", page: "LibraryPage.qml" },
-                    { title: "Downloads", desc: "Offline tracks", page: "DownloadsPage.qml" },
-                    { title: "History", desc: "Recently played", page: "HistoryPage.qml" },
-                    { title: "Settings", desc: "Account, appearance, playback", page: "SettingsPage.qml" },
-                    { title: "Providers", desc: "yt-dlp, fast resolve, PO-token provider", page: "ProvidersPage.qml" },
-                    { title: "SponsorBlock", desc: "Skip sponsors and other segments", page: "SponsorBlockPage.qml" }
+                    { title: qsTr("Library"), desc: qsTr("Playlists + Liked Music"), page: "LibraryPage.qml" },
+                    { title: qsTr("Downloads"), desc: qsTr("Offline tracks"), page: "DownloadsPage.qml" },
+                    { title: qsTr("History"), desc: qsTr("Recently played"), page: "HistoryPage.qml" },
+                    { title: qsTr("Settings"), desc: qsTr("Account, appearance, playback"), page: "SettingsPage.qml" },
+                    { title: qsTr("Providers"), desc: qsTr("yt-dlp, fast resolve, PO-token provider"), page: "ProvidersPage.qml" },
+                    { title: qsTr("SponsorBlock"), desc: qsTr("Skip sponsors and other segments"), page: "SponsorBlockPage.qml" }
                 ]
             })
         }
@@ -108,7 +108,7 @@ Page {
 
         PullDownMenu {
             MenuItem {
-                text: "Search"
+                text: qsTr("Search")
                 onClicked: pageStack.push(Qt.resolvedUrl("SearchPage.qml"))
             }
         }
@@ -134,8 +134,8 @@ Page {
                     Label {
                         width: parent.width
                         text: app.backend.ytmSessionState === "expired"
-                              ? "Your sign-in expired"
-                              : "Sign in for your recommendations"
+                              ? qsTr("Your sign-in expired")
+                              : qsTr("Sign in for your recommendations")
                         font.pixelSize: Theme.fontSizeMedium
                         color: app.backend.ytmSessionState === "expired"
                                ? Theme.errorColor : Theme.highlightColor
@@ -144,11 +144,8 @@ Page {
                     Label {
                         width: parent.width
                         text: app.backend.ytmSessionState === "expired"
-                              ? "Google no longer accepts the saved session. Open music.youtube.com "
-                                + "in the Sailfish browser (sign in if needed), then re-import. "
-                                + "Tap for Settings."
-                              : "Your Quick picks, Listen again and Mixed-for-you shelves appear "
-                                + "here once you're signed in. Tap to sign in."
+                              ? qsTr("Google no longer accepts the saved session. Open music.youtube.com in the Sailfish browser (sign in if needed), then re-import. Tap for Settings.")
+                              : qsTr("Your Quick picks, Listen again and Mixed-for-you shelves appear here once you're signed in. Tap to sign in.")
                         font.pixelSize: Theme.fontSizeExtraSmall
                         color: Theme.secondaryColor
                         wrapMode: Text.Wrap
@@ -177,8 +174,7 @@ Page {
                 x: Theme.horizontalPageMargin
                 width: parent.width - 2 * Theme.horizontalPageMargin
                 visible: !page.loading && page.shelves.length === 0 && page.errorText.length === 0
-                text: "Nothing to show yet. Pull down to Search for a song, or sign in for your "
-                      + "personalized home."
+                text: qsTr("Nothing to show yet. Pull down to Search for a song, or sign in for your personalized home.")
                 color: Theme.secondaryColor
                 wrapMode: Text.Wrap
                 font.pixelSize: Theme.fontSizeSmall

@@ -353,8 +353,18 @@ against the same shared C++ EQ API.
   `prefetchRadioTail` appends the radio early, without advancing, when the next track is the last
   in the queue (not under repeat modes; one ask per seed). Gapless/hand-off is NOT implemented.
 
-- **`ytm.py` is barely tested.** Only `get_playlist` continuation and the atomic stores have
-  tests (`YtmPlaylistContinuation`, `YtmAtomicStores`); `test_youfish.py` otherwise only fakes its
+- **Resolve errors pass through `_ytdlp_err`**, which keeps the last `ERROR:` line minus the
+  extractor prefix and yt-dlp's desktop advice (`--cookies-from-browser`, FAQ links). Errors that
+  match `_FINAL_ERR` (removed, terminated, not yet live, geo-blocked, private while signed out) skip
+  the binary re-run and the widen retry: no client changes YouTube's answer.
+
+- **A just-ended livestream (`live_status == "post_live"`) is refused** with a "still processing"
+  message. Until YouTube finishes the recording, its formats are DASH segment lists that the proxy
+  can't serve as one file.
+
+- **`ytm.py` is barely tested.** Only `get_playlist` continuation, the atomic stores and a few
+  parsers (search's top-result card, podcast episodes, instrumental lyrics, logout) have tests
+  (`YtmPlaylistContinuation`, `YtmAtomicStores`, `YtmSweepFixes`); `test_youfish.py` otherwise only fakes its
   `netscape_cookies()` surface (`test_youfish.py:361-379`) to exercise cookie handoff; no
   `test_ytm.py` exists anywhere in the tree. Every search/home/artist/radio/lyrics parsing
   change ships with no regression coverage — verify by hand.
@@ -395,6 +405,12 @@ against the same shared C++ EQ API.
   controls overlay, which FinTune has no equivalent of. If you add a full-bleed overlay
   here, copy the guard pattern from FinTube's `VideoPage.qml`, don't assume Qt 5.7+ is
   safe.
+- **Every user-visible QML string goes through `qsTr()`** (`CONFIG += sailfishapp_i18n`; the build's
+  lupdate refreshes `translations/*.ts`). Use `.arg()` for values, never `+` concatenation; `%n` for
+  counts (`qsTr("%n song(s)", "", n)`) — `translations/harbour-fintune-en.ts` supplies the English
+  plural forms and `main()` installs it as the fallback under the device language. Never wrap
+  setting keys/values, `py.call` names, or anything compared with `===`: use a flag instead of
+  testing translated text. Python-sourced messages stay English. Same setup as FinTube.
 - **Local vs CI SDK mismatch:** `build.sh` defaults to `SailfishOS-5.0.0.62-aarch64` while
   `.github/workflows/build.yml` pins release `5.0.0.43` — same class of drift as FinTube.
   A local build is not guaranteed to reproduce the release RPM bit-for-bit.

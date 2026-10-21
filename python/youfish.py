@@ -1017,6 +1017,16 @@ class _MediaProxyHandler(http.server.BaseHTTPRequestHandler):
             start = int(m.group(1))
         total = _clen(target)  # googlevideo's full length, straight from the URL (authoritative)
         _plog("REQ itag=%s range=%s total=%s" % (itag, raw_range or "none", total))
+        if total is not None and start >= total:
+            # A seek to (or past) the end: nothing to serve. 416 + "*/total" is what souphttpsrc
+            # turns into a clean EOS; a 206 here would carry a negative Content-Length.
+            self.send_response(416)
+            self.send_header("Content-Range", "bytes */%d" % total)
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            return
 
         s = _acquire(video_id, itag, target, ua, total, start)
         if s is None:
@@ -1220,10 +1230,27 @@ def _ytdlp_formats(video_id, anon=False):
         if proc.returncode != 0:
             return {}
         data = json.loads(proc.stdout)
-        return {f.get("format_id"): f.get("url")
-                for f in data.get("formats", []) if f.get("format_id") and f.get("url")}
+        out = {}
+        for f in data.get("formats", []):
+            fid, u = f.get("format_id"), f.get("url")
+            if not fid or not u:
+                continue
+            out[fid] = u
+            # yt-dlp numbers same-itag dub tracks by position (251-8); the fast path names them
+            # by track id (251-es.3). Also key each by language so a recovery that crosses from
+            # one path to the other still finds its track (see _track_alias).
+            if f.get("language") and "-" in fid:
+                base = fid.split("-")[0] + ("-drc" if "-drc" in fid else "")
+                out.setdefault("%s@%s" % (base, f["language"]), u)
+        return out
     except Exception:
         return {}
+
+
+def _track_alias(itag):
+    """The language key _ytdlp_formats adds for a dub track: "251-es.3" → "251@es"."""
+    m = re.fullmatch(r"(\d+(?:-drc)?)-([A-Za-z]+(?:-[A-Za-z]+)*)(?:\.\d+)?", itag or "")
+    return "%s@%s" % (m.group(1), m.group(2)) if m else None
 
 
 def _reresolve(video_id, itag, failed_url, refused=False):
@@ -1244,10 +1271,15 @@ def _reresolve(video_id, itag, failed_url, refused=False):
     the same client again only hands back another URL it refuses (on device: three rounds, ~6s,
     each probing fine), so this skips the fast client and any cached fast URL and goes to yt-dlp.
     """
+    alias = _track_alias(itag)
+
+    def pick(fmts):                     # this itag, or the same dub track under yt-dlp's naming
+        return fmts.get(itag) or (fmts.get(alias) if alias else None)
+
     with _url_cache_lock:
         ent = _url_cache.get(video_id)
         if ent and time.time() - ent["ts"] < _URL_CACHE_TTL:
-            cached = ent["fmts"].get(itag)
+            cached = pick(ent["fmts"])
             if cached and cached != failed_url and not (refused and _fast_client_url(cached)):
                 return cached  # another track already refreshed this generation
         now = time.time()
@@ -1264,7 +1296,7 @@ def _reresolve(video_id, itag, failed_url, refused=False):
         src = "innertube" if fresh.get(itag) else (_default_client() or "auto")
         if not fresh.get(itag):
             fresh = _ytdlp_formats(video_id, anon=True)
-        if not fresh.get(itag):
+        if not pick(fresh):
             if len(_reresolve_spawns) < _RERESOLVE_BURST:      # the fallback spawn pays the limit too
                 _reresolve_spawns.append(time.time())
                 fresh2 = _ytdlp_formats(video_id)              # cookie'd + minted-token safety net
@@ -1276,13 +1308,13 @@ def _reresolve(video_id, itag, failed_url, refused=False):
             return None
         if _DEBUG:   # the WARM re-resolve's token + client for the exact itag that 403'd
             _tlog("reresolve itag=%s %s client=%s"
-                  % (itag, _pot_of(fresh.get(itag, "")), src))
+                  % (itag, _pot_of(pick(fresh) or ""), src))
         _url_cache[video_id] = {"ts": time.time(), "fmts": fresh}
         if len(_url_cache) > _URL_CACHE_MAX:  # evict oldest beyond the cap
             for k, _ in sorted(_url_cache.items(),
                                key=lambda kv: kv[1]["ts"])[:len(_url_cache) - _URL_CACHE_MAX]:
                 _url_cache.pop(k, None)
-        return fresh.get(itag)
+        return pick(fresh)
 
 
 # --------------------------------------------------------------------------- #
@@ -1557,6 +1589,34 @@ def _signed_in():
         return bool(ytm.netscape_cookies())
     except Exception:
         return False
+
+
+# yt-dlp errors that are YouTube's final word on a video. No other client, cookie set or the
+# binary changes them, so a resolve that hears one stops there instead of paying 1-5 s more of
+# extractions to hear it again (a removed track in a queue used to cost ~5 s before the skip).
+# Private videos are final only signed out: signed in, the cookie'd retry may be granted access.
+_FINAL_ERR = re.compile(r"video has been removed|has been terminated|live event will begin|"
+                        r"Premieres in|not made this video available in your country|"
+                        r"Incomplete YouTube ID", re.I)
+
+
+def _final_error(msg):
+    msg = msg or ""
+    if "try again later" in msg.lower():
+        return False                                   # rate limiting, worded as "unavailable"
+    return bool(_FINAL_ERR.search(msg)) or ("Private video" in msg and not _signed_in())
+
+
+def _ytdlp_err(stderr, default):
+    """The user-facing part of a yt-dlp failure: its last ERROR line, without the
+    "ERROR: [extractor] id:" prefix or the desktop advice (--cookies-from-browser, FAQ links) that
+    means nothing on a phone. stderr can open with WARNING lines; those aren't the reason."""
+    lines = [l.strip() for l in (stderr or "").splitlines() if l.strip()]
+    errs = [l for l in lines if l.startswith("ERROR:")]
+    msg = errs[-1] if errs else (lines[-1] if lines else "")
+    msg = re.sub(r"^ERROR:\s*(?:\[[^\]]+\]\s*(?:[\w-]+:\s+)?)?", "", msg)
+    msg = re.split(r"\s+(?:Use --|See\s+https?://|Also see\s)", msg)[0]
+    return msg.strip()[:300] or default
 
 
 def _resolve_key(video_id):
@@ -2032,6 +2092,7 @@ def install_ytdlp_zipapp():
         return {"ok": False}
 
     def run():
+        global _YT_DLP_MOD
         tmp = None
         try:
             _force_ipv4()
@@ -2039,7 +2100,8 @@ def install_ytdlp_zipapp():
             expected = _expected_sha256(ctx, _YTDLP_ZIPAPP_ASSET)   # None if the sums can't be parsed
             dest = _ytdlp_zipapp_read_path()
             os.makedirs(os.path.dirname(dest), exist_ok=True)
-            tmp = dest + ".part"
+            # Per-thread: the launch autofetch and an Update tap can overlap.
+            tmp = "%s.part-%d" % (dest, threading.get_ident())
             h = hashlib.sha256()
             with _https_open(_ytdlp_release_base() + _YTDLP_ZIPAPP_ASSET, ctx) as resp:
                 total = int(resp.headers.get("Content-Length") or 0)
@@ -2077,6 +2139,11 @@ def install_ytdlp_zipapp():
                 return
             os.chmod(tmp, 0o644)
             os.replace(tmp, dest)
+            if _YT_DLP_IMPORT_DONE:
+                # The imported copy loads its modules lazily from this path, and zipimport keeps
+                # the OLD file's offsets, so each later import from the new file fails. Retire the
+                # in-process tier for this session: the (updated) binary answers until relaunch.
+                _YT_DLP_MOD = None
             ver = _zipapp_version(dest)
             note = "Installed yt-dlp zipapp " + (ver or "(unknown version)")
             if not expected:
@@ -2232,7 +2299,7 @@ def _inproc_apply_cookies(ydl, anon=False):
             text = ""
     if getattr(_inproc_tls, "cookie_hash", None) == hash(text):
         return
-    _inproc_tls.cookie_hash = hash(text)
+    _inproc_tls.cookie_hash = None   # stamped only once the jar matches: a failed load retries
     try:
         jar = ydl.cookiejar
         jar.clear()
@@ -2247,6 +2314,7 @@ def _inproc_apply_cookies(ydl, anon=False):
                     os.remove(p)
                 except Exception:
                     pass
+        _inproc_tls.cookie_hash = hash(text)
     except Exception:
         pass
 
@@ -3300,6 +3368,9 @@ def _resolve_uncached(video_id):
                     _tlog("dump(inproc) %.2fs" % (time.time() - _td))
                 return data, ""
             except Exception as ex:
+                if _final_error(str(ex)):     # the binary would only say the same, ~1 s later
+                    _tlog("dump(inproc) final %.2fs: %s" % (time.time() - _td, str(ex)[:120]))
+                    return None, _ytdlp_err(str(ex), "resolve failed")
                 _tlog("dump(inproc) failed %.2fs → binary: %s"
                       % (time.time() - _td, str(ex)[:120]))
         with (contextlib.nullcontext([]) if anon else _cookies_args()) as cargs:
@@ -3310,7 +3381,7 @@ def _resolve_uncached(video_id):
                 preexec_fn=_set_pdeathsig)   # D6: SIGKILL an orphaned prefetch child with the app
         _tlog("dump %.2fs rc=%d%s" % (time.time() - _td, proc.returncode, " anon" if anon else ""))
         if proc.returncode != 0:
-            return None, (proc.stderr.strip()[:300] or "resolve failed")
+            return None, _ytdlp_err(proc.stderr, "resolve failed")
         try:
             return json.loads(proc.stdout), ""
         except Exception as ex:
@@ -3338,11 +3409,13 @@ def _resolve_uncached(video_id):
         if fast is not None:
             pass
         elif data is None:
-            data2, err2 = _dump(_yt_extractor_args(client_override=_RETRY_CLIENTS, want_pot=True))
-            if data2 is not None:
-                data = data2; _client_used = _RETRY_CLIENTS + "(widen)"
-            else:
-                err = err or err2
+            if not _final_error(err):       # removed / geo-blocked: no client helps
+                data2, err2 = _dump(_yt_extractor_args(client_override=_RETRY_CLIENTS,
+                                                       want_pot=True))
+                if data2 is not None:
+                    data = data2; _client_used = _RETRY_CLIENTS + "(widen)"
+                else:
+                    err = err or err2
         # Music path: the token-free primary almost always carries the full audio ladder
         # (+ muxed), so make do with ONE pass. Only widen the client net when it gave us
         # literally nothing an audio player can use.
@@ -3353,6 +3426,15 @@ def _resolve_uncached(video_id):
         if data is None:
             return {"ok": False, "error": err}
         formats = data.get("formats", [])
+        if data.get("live_status") == "post_live":
+            # A stream that just ended: until YouTube has processed the recording, its formats are
+            # DASH segment lists (sq=0..N) and the proxy serves one URL as one file, so the first
+            # ~1 MB segment would play and then stop. Refuse with the reason instead.
+            formats = [f for f in formats if f.get("protocol") != "http_dash_segments"]
+            data["formats"] = formats
+            if not _audio_playable(data):
+                return {"ok": False, "error": "This livestream just ended and YouTube is still "
+                                              "processing the recording. Try again later."}
         # Token-free probe: the primary client is the fast default and needs NO token, but token-free
         # clients are the ones YouTube gates unpredictably — when gated the stream 403s the instant
         # playback fetches it. Probe one chosen URL; on a real 403 re-extract with the reliable TOKEN
@@ -3421,7 +3503,7 @@ def _resolve_uncached(video_id):
             audio_urls.append(_proxied(af["url"], video_id, af.get("format_id"), http_ua))
         _tlog("resolve TOTAL %.2fs" % (time.time() - _t0))
         return {"ok": True, "info": {
-            "title": data.get("title", ""),
+            "title": data.get("title") or "",
             "is_live": bool(data.get("is_live")) or (data.get("live_status") == "is_live"),
             "uploader": data.get("uploader") or data.get("channel") or "",
             "channel_id": data.get("channel_id") or data.get("uploader_id") or "",
@@ -3731,24 +3813,34 @@ def _downloads_path():
 
 
 def _safe_name(s):
-    s = re.sub(r"[^\w\-. ]+", "_", s or "")[:80].strip()
+    s = re.sub(r"[^\w\-. ]+", "_", s or "")[:80]
+    # \w keeps non-ASCII letters, and 80 CJK characters are 240 bytes: with the " [id] kind.ext"
+    # suffix that passes the 255-BYTE filename limit (ENAMETOOLONG). Cap the bytes too.
+    s = s.encode("utf-8")[:150].decode("utf-8", "ignore").strip()
     return s or "track"
+
+
+# downloads.json is read-modify-written by the download thread, delete_download and
+# list_downloads' self-heal; reentrant because the writers read through list_downloads.
+_downloads_lock = threading.RLock()
 
 
 def list_downloads():
     """Completed downloads: [{id, title, kind, path, subtitle?, thumb?, artistId?}, ...].
     Drops entries whose file is gone."""
-    try:
-        with open(_downloads_path()) as f:
-            lst = json.load(f)
-        if not isinstance(lst, list):
+    with _downloads_lock:
+        try:
+            with open(_downloads_path()) as f:
+                lst = json.load(f)
+            if not isinstance(lst, list):
+                return []
+        except Exception:
             return []
-    except Exception:
-        return []
-    live = [d for d in lst if d.get("path") and os.path.exists(d["path"])]
-    if len(live) != len(lst):
-        _save_downloads(live)
-    return live
+        live = [d for d in lst
+                if isinstance(d, dict) and d.get("path") and os.path.exists(d["path"])]
+        if len(live) != len(lst):
+            _save_downloads(live)
+        return live
 
 
 def _save_downloads(lst):
@@ -3816,6 +3908,10 @@ _dl_queue = queue.Queue()
 _dl_worker_lock = threading.Lock()
 _dl_worker_started = False
 _DL_GAP = (1.0, 3.0)   # randomized gap (s) between consecutive downloads (fast-but-paced)
+# Ids queued or downloading. A second tap (or "Download all" over a track still in the queue) must
+# not queue it again: the repeat run found the finished file and failed trying to "resume" it.
+_dl_pending = set()
+_dl_pending_lock = threading.Lock()
 
 
 def _ensure_dl_worker():
@@ -3835,6 +3931,8 @@ def _dl_worker():
         except Exception:
             pass
         finally:
+            with _dl_pending_lock:
+                _dl_pending.discard(job["video_id"])
             _dl_queue.task_done()
         # Pace only within a burst: sleep before the next queued item, never after a lone download.
         if not _dl_queue.empty():
@@ -3845,6 +3943,10 @@ def download(video_id, title, kind="audio", meta=None):
     """Queue a single offline audio download. Returns at once; the serial worker does the work and
     emits download_progress / download_done (see _run_download)."""
     _ensure_dl_worker()
+    with _dl_pending_lock:
+        if video_id in _dl_pending:               # already on its way: its done event will come
+            return {"ok": True, "queued": _dl_queue.qsize()}
+        _dl_pending.add(video_id)
     _dl_queue.put({"video_id": video_id, "title": title, "kind": "audio", "meta": meta})
     return {"ok": True, "queued": _dl_queue.qsize()}
 
@@ -3863,6 +3965,10 @@ def download_many(items):
         if not vid or vid in have:
             continue
         have.add(vid)
+        with _dl_pending_lock:
+            if vid in _dl_pending:
+                continue
+            _dl_pending.add(vid)
         meta = dict((k, it.get(k)) for k in ("subtitle", "thumb", "artistId") if it.get(k))
         _dl_queue.put({"video_id": vid, "title": it.get("title") or vid,
                        "kind": kind, "meta": meta})
@@ -3900,7 +4006,9 @@ def _run_download(video_id, title, kind, meta):
             proc = subprocess.Popen(
                 [binp, *_COMMON_ARGS, *(["--cookies", ck] if ck else []),
                  *_yt_extractor_args(want_pot=True, cookies=bool(ck)), *_pot_ytdlp_args(),
-                 "--no-playlist", "-f", fmt, "--no-part", "--newline",
+                 # --no-continue: with --no-part a file already at the final name looks like
+                 # a partial download, and "resuming" it 403s or appends to a fixed-up file.
+                 "--no-playlist", "-f", fmt, "--no-part", "--no-continue", "--newline",
                  "-o", base + ".%(ext)s", "--", url],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                 # Die with the app: the result can only be REGISTERED (downloads.json + the
@@ -3926,11 +4034,9 @@ def _run_download(video_id, title, kind, meta):
             fpath = base + "." + ext
             if proc.returncode == 0 and not os.path.exists(fpath):
                 import glob
-                cand = glob.glob(base + ".*")
+                cand = glob.glob(glob.escape(base) + ".*")   # base has "[id]": a glob class
                 fpath = cand[0] if cand else fpath
             if proc.returncode == 0 and os.path.exists(fpath):
-                lst = [d for d in list_downloads()
-                       if not (d.get("id") == video_id and d.get("kind") == kind)]
                 entry = {"id": video_id, "title": title or video_id,
                          "kind": kind, "path": fpath}
                 if isinstance(meta, dict):        # artist/cover for the Downloads list + player
@@ -3957,8 +4063,13 @@ def _run_download(video_id, title, kind, meta):
                             entry["loudness_db"] = pl["loudness_db"]
                     except Exception:
                         pass
-                lst.insert(0, entry)
-                _save_downloads(lst)
+                # Read the list only now, under the lock: the SponsorBlock + loudness fetches above
+                # take seconds, and a list read before them would undo a delete made meanwhile.
+                with _downloads_lock:
+                    lst = [d for d in list_downloads()
+                           if not (d.get("id") == video_id and d.get("kind") == kind)]
+                    lst.insert(0, entry)
+                    _save_downloads(lst)
                 pyotherside.send("download_done", video_id, kind, True, "")
             else:
                 # Surface yt-dlp's own tail output so a failure is diagnosable, not a shrug.
@@ -3978,16 +4089,17 @@ def _run_download(video_id, title, kind, meta):
 
 def delete_download(video_id, kind):
     keep = []
-    for d in list_downloads():
-        if d.get("id") == video_id and d.get("kind") == kind:
-            try:
-                if d.get("path") and os.path.exists(d["path"]):
-                    os.remove(d["path"])
-            except Exception:
-                pass
-        else:
-            keep.append(d)
-    _save_downloads(keep)
+    with _downloads_lock:
+        for d in list_downloads():
+            if d.get("id") == video_id and d.get("kind") == kind:
+                try:
+                    if d.get("path") and os.path.exists(d["path"]):
+                        os.remove(d["path"])
+                except Exception:
+                    pass
+            else:
+                keep.append(d)
+        _save_downloads(keep)
     return {"ok": True, "downloads": keep}
 
 

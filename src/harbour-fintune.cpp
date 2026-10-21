@@ -12,6 +12,8 @@
 #include <QStandardPaths>
 #include <QDir>
 #include <QFile>
+#include <QLocale>
+#include <QTranslator>
 #include <gst/gst.h>
 #include "videoplayer.h"
 
@@ -78,6 +80,17 @@ int main(int argc, char *argv[])
     qmlRegisterType<VideoPlayer>("FinTune", 1, 0, "VideoPlayer");
 
     QScopedPointer<QGuiApplication> app(SailfishApp::application(argc, argv));
+    // SailfishApp already loaded harbour-fintune-<locale>.qm. Install two more translators on top,
+    // in this order, so lookups go: the device language first, then English, then the source text.
+    // The English file only fills in plurals ("%n song(s)" -> "1 song" / "5 songs"), so a phone
+    // in a language nobody has translated yet still reads proper English instead of "song(s)".
+    const QString i18nDir = SailfishApp::pathTo(QStringLiteral("translations")).toLocalFile();
+    QTranslator *english = new QTranslator(app.data());
+    if (english->load(QStringLiteral("harbour-fintune-en"), i18nDir))
+        app->installTranslator(english);
+    QTranslator *native = new QTranslator(app.data());
+    if (native->load(QLocale(), QStringLiteral("harbour-fintune"), QStringLiteral("-"), i18nDir))
+        app->installTranslator(native);
     QScopedPointer<QQuickView> view(SailfishApp::createView());
     // Release the GL context + scene graph when the window is hidden (display blank) and rebuild
     // them fresh on show, so cached GL textures (glyph atlas, cover art) can't be left dangling

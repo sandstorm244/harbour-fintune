@@ -339,6 +339,8 @@ ApplicationWindow {
         if (index < app.playQueueIndex)
             app.playQueueIndex -= 1
         app.playQueue = q
+        if (app.npActive)
+            app.prefetchNext()             // the next track may have changed: warm the right one
     }
 
     // --- Shuffle ---
@@ -564,7 +566,7 @@ ApplicationWindow {
     function addToPlaylist(track) {
         if (!track || !track.videoId)
             return
-        if (!backend.ytmLoggedIn) { app.showToast("Sign in to use playlists"); return }
+        if (!backend.ytmLoggedIn) { app.showToast(qsTr("Sign in to use playlists")); return }
         pageStack.push(Qt.resolvedUrl("pages/PlaylistPickerPage.qml"), { track: track })
     }
 
@@ -576,11 +578,11 @@ ApplicationWindow {
         if (app.npRating === rating) {
             app.npRating = ""
             backend.musicRate(app.npId, "INDIFFERENT")
-            app.showToast(rating === "LIKE" ? "Like removed" : "Dislike removed")
+            app.showToast(rating === "LIKE" ? qsTr("Like removed") : qsTr("Dislike removed"))
         } else {
             app.npRating = rating
             backend.musicRate(app.npId, rating)
-            app.showToast(rating === "LIKE" ? "Liked" : "Disliked")
+            app.showToast(rating === "LIKE" ? qsTr("Liked") : qsTr("Disliked"))
         }
     }
 
@@ -616,9 +618,9 @@ ApplicationWindow {
         backend.downloadTrack(track)
         var a = {}
         for (var k in app.dlActive) a[k] = app.dlActive[k]
-        a[track.videoId] = { title: track.title || "track", subtitle: track.subtitle || "", pct: 0 }
+        a[track.videoId] = { title: track.title || qsTr("track"), subtitle: track.subtitle || "", pct: 0 }
         app.dlActive = a
-        app.showToast("Downloading " + (track.title || "track") + "…")
+        app.showToast(qsTr("Downloading %1…").arg(track.title || qsTr("track")))
     }
 
     // Download a whole playlist/album. The engine queues them serially with pacing and reports
@@ -637,14 +639,15 @@ ApplicationWindow {
             for (var k in app.dlActive) a[k] = app.dlActive[k]
             for (var j = 0; j < ids.length; j++) {
                 var t = byId[ids[j]]
-                if (t) a[ids[j]] = { title: t.title || "track", subtitle: t.subtitle || "", pct: 0 }
+                if (t) a[ids[j]] = { title: t.title || qsTr("track"), subtitle: t.subtitle || "", pct: 0 }
             }
             app.dlActive = a
             if (ids.length > 0)
-                app.showToast("Queued " + ids.length + " song" + (ids.length === 1 ? "" : "s")
-                              + (skipped > 0 ? " (" + skipped + " already saved)" : "") + "…")
+                app.showToast(skipped > 0
+                              ? qsTr("Queued %n song(s) (%1 already saved)…", "", ids.length).arg(skipped)
+                              : qsTr("Queued %n song(s)…", "", ids.length))
             else
-                app.showToast("All songs already downloaded")
+                app.showToast(qsTr("All songs already downloaded"))
         })
     }
 
@@ -677,7 +680,7 @@ ApplicationWindow {
                 return
             var a = {}
             for (var k in app.dlActive) a[k] = app.dlActive[k]
-            var t = (a[videoId] && a[videoId].title) ? a[videoId].title : "Downloading"
+            var t = (a[videoId] && a[videoId].title) ? a[videoId].title : qsTr("Downloading")
             var sub = (a[videoId] && a[videoId].subtitle) ? a[videoId].subtitle : ""
             a[videoId] = { title: t, subtitle: sub, pct: percent }
             app.dlActive = a
@@ -689,7 +692,7 @@ ApplicationWindow {
                 if (k !== videoId) a[k] = app.dlActive[k]
             app.dlActive = a
             if (kind === "audio") {
-                app.showToast(ok ? "Downloaded" : ("Download failed: " + message))
+                app.showToast(ok ? qsTr("Downloaded") : qsTr("Download failed: %1").arg(message))
                 if (ok)                          // stash its lyrics alongside the audio, for offline
                     app.backend.musicCacheLyrics(videoId, was ? was.title : "",
                                                  was ? was.subtitle : "", 0)
@@ -724,6 +727,8 @@ ApplicationWindow {
             app.playSong(item)
         else if (item.kind === "artist" && item.browseId)
             app.openArtist(item.browseId, item.title)
+        else if (item.browseId && item.browseId.indexOf("UC") === 0)
+            app.openArtist(item.browseId, item.title)   // user profile / channel, not a tracklist
         else if (item.browseId)
             pageStack.push(Qt.resolvedUrl("pages/PlaylistPage.qml"),
                 { browseId: item.browseId, playlistTitle: item.title || "",
@@ -739,8 +744,11 @@ ApplicationWindow {
 
     Connections {
         target: backend
-        onResolved: app.applyResolved(info)
+        // Drop answers for a track we've since moved off (tap A then B, or Next).
+        onResolved: if (forId === app.npId) app.applyResolved(info)
         onResolveError: {
+            if (forId !== app.npId)
+                return
             app.npResolving = false
             app.skipFailedTrack()              // couldn't even resolve → move on
         }
@@ -831,9 +839,16 @@ ApplicationWindow {
         }
         if (app.radioLoading || !app.npId || !backend.autoplay)
             return
+        var seed = app.npId
+        var n = app.playQueue.length
+        var lastId = n > 0 ? app.playQueue[n - 1].videoId : ""
         app.radioLoading = true
-        backend.musicRadio(app.npId, function(res) {
+        backend.musicRadio(seed, function(res) {
             app.radioLoading = false
+            // The queue / current track changed under the request (new album, skip) → drop it.
+            if (app.npId !== seed || app.playQueue.length !== n
+                    || (n > 0 && app.playQueue[n - 1].videoId !== lastId))
+                return
             var tracks = (res && res.tracks) ? res.tracks : []
             if (app.shuffle)                       // shuffle on → don't fill in fixed radio order
                 tracks = app.shuffledCopy(tracks)
@@ -861,7 +876,7 @@ ApplicationWindow {
         if (app.npFailStreak <= 4)
             app.playNext()
         else
-            app.npError = "Couldn't play the next few tracks — stopped."
+            app.npError = qsTr("Couldn't play the next few tracks — stopped.")
     }
 
     // Walk the audio ladder (best codec first), then the muxed progressive stream (itag 18), then
@@ -998,7 +1013,7 @@ ApplicationWindow {
             }
             Label {
                 width: parent.width
-                text: app.npResolving ? "Loading…" : app.npArtist
+                text: app.npResolving ? qsTr("Loading…") : app.npArtist
                 truncationMode: TruncationMode.Fade
                 font.pixelSize: Theme.fontSizeExtraSmall
                 color: Theme.secondaryColor

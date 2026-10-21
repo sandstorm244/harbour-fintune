@@ -41,7 +41,7 @@ Page {
     SearchField {
         id: searchField
         anchors { top: parent.top; left: parent.left; right: parent.right }
-        placeholderText: "Search songs, artists, albums"
+        placeholderText: qsTr("Search songs, artists, albums")
         inputMethodHints: Qt.ImhNoAutoUppercase | Qt.ImhNoPredictiveText
         EnterKey.iconSource: "image://theme/icon-m-enter-close"
         EnterKey.onClicked: focus = false
@@ -93,18 +93,18 @@ Page {
             Component {
                 id: songMenu
                 ContextMenu {
-                    MenuItem { text: "Play next"; onClicked: app.queueInsertNext(modelData) }
-                    MenuItem { text: "Add to queue"; onClicked: app.queueAppend(modelData) }
-                    MenuItem { text: "Add to playlist"; onClicked: app.addToPlaylist(modelData) }
+                    MenuItem { text: qsTr("Play next"); onClicked: app.queueInsertNext(modelData) }
+                    MenuItem { text: qsTr("Add to queue"); onClicked: app.queueAppend(modelData) }
+                    MenuItem { text: qsTr("Add to playlist"); onClicked: app.addToPlaylist(modelData) }
                     MenuItem {
-                        text: app.isDownloaded(modelData.videoId) ? "Remove download" : "Download"
+                        text: app.isDownloaded(modelData.videoId) ? qsTr("Remove download") : qsTr("Download")
                         onClicked: app.isDownloaded(modelData.videoId)
                                    ? app.backend.deleteDownload(modelData.videoId, "audio")
                                    : app.downloadTrack(modelData)
                     }
-                    MenuItem { text: "Like"
+                    MenuItem { text: qsTr("Like")
                         onClicked: app.backend.musicRate(modelData.videoId, "LIKE") }
-                    MenuItem { text: "Dislike"
+                    MenuItem { text: qsTr("Dislike")
                         onClicked: app.backend.musicRate(modelData.videoId, "DISLIKE") }
                 }
             }
@@ -136,9 +136,9 @@ Page {
                     right: parent.right; rightMargin: Theme.horizontalPageMargin
                     verticalCenter: parent.verticalCenter
                 }
-                text: modelData.kind === "artist" ? "Artist"
-                      : modelData.kind === "album" ? "Album"
-                      : modelData.kind === "playlist" ? "Playlist" : ""
+                text: modelData.kind === "artist" ? qsTr("Artist")
+                      : modelData.kind === "album" ? qsTr("Album")
+                      : modelData.kind === "playlist" ? qsTr("Playlist") : ""
                 font.pixelSize: Theme.fontSizeExtraSmall
                 color: Theme.secondaryColor
             }
@@ -170,8 +170,8 @@ Page {
         ViewPlaceholder {
             enabled: !page.searching && page.results.length === 0
                      && page.query.trim().length === 0
-            text: "Search YouTube Music"
-            hintText: "Songs, artists, albums — no sign-in needed to play."
+            text: qsTr("Search YouTube Music")
+            hintText: qsTr("Songs, artists, albums — no sign-in needed to play.")
         }
 
         VerticalScrollDecorator { }

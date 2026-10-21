@@ -17,12 +17,12 @@ Page {
         app.backend.musicLibrary(function(res) {
             page.loading = false
             if (res && res.logged_in === false) {
-                page.errorText = "Sign in to use playlists."
+                page.errorText = qsTr("Sign in to use playlists.")
                 return
             }
             page.playlists = (res && res.playlists) ? res.playlists : []
             if (page.playlists.length === 0)
-                page.errorText = "No playlists found. Create one in YouTube Music first."
+                page.errorText = qsTr("No playlists found. Create one in YouTube Music first.")
         })
     }
 
@@ -33,10 +33,13 @@ Page {
         app.backend.musicAddToPlaylist(pl.browseId, page.track.videoId, function(res) {
             page.adding = false
             if (res && res.ok)
-                app.showToast("Added to " + (pl.title || "playlist"))
+                app.showToast(qsTr("Added to %1").arg(pl.title || qsTr("playlist")))
             else
-                app.showToast((res && res.error) ? res.error : "Couldn't add to playlist")
-            pageStack.pop()
+                app.showToast((res && res.error) ? res.error : qsTr("Couldn't add to playlist"))
+            // Only pop if we're still the page on top (the user may have navigated away
+            // meanwhile) — otherwise this would pop some other page.
+            if (page && page.status === PageStatus.Active && pageStack.currentPage === page)
+                pageStack.pop()
         })
     }
 
@@ -48,7 +51,7 @@ Page {
         header: Column {
             width: list.width
             PageHeader {
-                title: "Add to playlist"
+                title: qsTr("Add to playlist")
                 description: page.track ? (page.track.title || "") : ""
             }
             BusyIndicator {
@@ -119,7 +122,7 @@ Page {
 
         ViewPlaceholder {
             enabled: !page.loading && page.playlists.length === 0
-            text: page.errorText.length > 0 ? page.errorText : "No playlists"
+            text: page.errorText.length > 0 ? page.errorText : qsTr("No playlists")
         }
 
         VerticalScrollDecorator { }

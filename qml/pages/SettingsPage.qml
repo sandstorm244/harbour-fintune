@@ -23,27 +23,28 @@ Page {
             width: parent.width
             spacing: Theme.paddingMedium
 
-            PageHeader { title: "Settings" }
+            PageHeader { title: qsTr("Settings") }
 
             // Account first: signing in unlocks the personalized home + library.
-            SectionHeader { text: "Account" }
+            SectionHeader { text: qsTr("Account") }
 
             Label {
                 x: Theme.horizontalPageMargin
                 width: parent.width - 2 * Theme.horizontalPageMargin
                 wrapMode: Text.Wrap
                 text: app.backend.ytmSessionState === "expired"
-                      ? "Your sign-in expired — Google no longer accepts the saved session. Open "
-                        + "music.youtube.com in the Sailfish browser (sign in if needed), then tap "
-                        + "Re-import below."
+                      ? qsTr("Your sign-in expired — Google no longer accepts the saved session. Open "
+                           + "music.youtube.com in the Sailfish browser (sign in if needed), then tap "
+                           + "Re-import below.")
                       : (app.backend.ytmLoggedIn
-                         ? ("Signed in"
-                            + (app.backend.ytmAccount ? " as " + app.backend.ytmAccount : "")
-                            + " — your personalized home, playlists and liked songs are available.")
-                         : "Browsing and playback work signed out. For your recommendations and "
-                           + "playlists: sign in to music.youtube.com in the Sailfish browser, then "
-                           + "tap Import from browser below. (Google blocks sign-in inside apps, so we "
-                           + "read the session from your real browser — nothing to copy.)")
+                         ? (app.backend.ytmAccount
+                            ? qsTr("Signed in as %1 — your personalized home, playlists and liked songs are available.")
+                                  .arg(app.backend.ytmAccount)
+                            : qsTr("Signed in — your personalized home, playlists and liked songs are available."))
+                         : qsTr("Browsing and playback work signed out. For your recommendations and "
+                                + "playlists: sign in to music.youtube.com in the Sailfish browser, then "
+                                + "tap Import from browser below. (Google blocks sign-in inside apps, so we "
+                                + "read the session from your real browser — nothing to copy.)"))
                 color: app.backend.ytmSessionState === "expired"
                        ? Theme.errorColor
                        : (app.backend.ytmLoggedIn ? Theme.secondaryHighlightColor : Theme.secondaryColor)
@@ -63,7 +64,7 @@ Page {
             Button {
                 anchors.horizontalCenter: parent.horizontalCenter
                 text: (app.backend.ytmLoggedIn || app.backend.ytmSessionState === "expired")
-                      ? "Re-import from browser" : "Import from browser"
+                      ? qsTr("Re-import from browser") : qsTr("Import from browser")
                 onClicked: app.backend.ytmImportBrowserLogin()
             }
             // Ask Google directly whether the stored session still works — turns the silent
@@ -71,18 +72,18 @@ Page {
             Button {
                 anchors.horizontalCenter: parent.horizontalCenter
                 visible: app.backend.ytmLoggedIn
-                text: "Check sign-in"
+                text: qsTr("Check sign-in")
                 onClicked: {
-                    app.backend.ytmLoginMsg = "Checking with Google…"
+                    app.backend.ytmLoginMsg = qsTr("Checking with Google…")
                     app.backend.verifySession(function(res) {
                         if (!res || res.checked === false)
-                            app.backend.ytmLoginMsg = "Couldn't reach Google to check — try again."
+                            app.backend.ytmLoginMsg = qsTr("Couldn't reach Google to check — try again.")
                         else if (res.ok)
-                            app.backend.ytmLoginMsg = "Signed in" + (res.account ? " as " + res.account : "") + "."
+                            app.backend.ytmLoginMsg = res.account ? qsTr("Signed in as %1.").arg(res.account) : qsTr("Signed in.")
                         else
-                            app.backend.ytmLoginMsg = "Session expired — Google no longer accepts it. "
+                            app.backend.ytmLoginMsg = qsTr("Session expired — Google no longer accepts it. "
                                 + "Open music.youtube.com in the Sailfish browser (sign in if needed), "
-                                + "then Re-import."
+                                + "then Re-import.")
                     })
                 }
             }
@@ -91,35 +92,36 @@ Page {
             // "it uses the wrong channel / my playlists don't show".
             ValueButton {
                 visible: app.backend.ytmLoggedIn
-                label: "Channel"
-                value: app.backend.ytmSelectedName || app.backend.ytmAccount || "Default"
-                description: "Choose which account or channel (incl. brand accounts) to use."
+                //: YouTube channel / account identity
+                label: qsTr("Channel")
+                value: app.backend.ytmSelectedName || app.backend.ytmAccount || qsTr("Default")
+                description: qsTr("Choose which account or channel (incl. brand accounts) to use.")
                 onClicked: pageStack.push(Qt.resolvedUrl("AccountsPage.qml"))
             }
 
             Button {
                 anchors.horizontalCenter: parent.horizontalCenter
                 visible: app.backend.ytmLoggedIn
-                text: "Sign out"
+                text: qsTr("Sign out")
                 onClicked: app.backend.ytmLogout()
             }
 
-            SectionHeader { text: "Appearance" }
+            SectionHeader { text: qsTr("Appearance") }
 
             TextSwitch {
-                text: "Now-playing backdrop"
-                description: "Show a soft, blurred wash of the current track's cover art behind "
-                             + "the home screen."
+                text: qsTr("Now-playing backdrop")
+                description: qsTr("Show a soft, blurred wash of the current track's cover art behind "
+                                  + "the home screen.")
                 automaticCheck: false
                 checked: app.backend.homeBackdrop
                 onClicked: app.backend.setHomeBackdrop(!app.backend.homeBackdrop)
             }
 
-            SectionHeader { text: "Playback" }
+            SectionHeader { text: qsTr("Playback") }
 
             ValueButton {
-                label: "Equalizer"
-                value: app.backend.eqEnabled ? "On" : "Off"
+                label: qsTr("Equalizer")
+                value: app.backend.eqEnabled ? qsTr("On") : qsTr("Off")
                 onClicked: pageStack.push(Qt.resolvedUrl("EqualizerPage.qml"))
             }
 
@@ -130,7 +132,7 @@ Page {
                 maximumValue: 500
                 stepSize: 10
                 value: Math.round(app.backend.boostGain * 100)
-                label: "Volume boost"
+                label: qsTr("Volume boost")
                 valueText: value + "%"
                 // Live preview while dragging; persist + re-bind on release.
                 onValueChanged: if (app.player) app.player.setBoost(value / 100)
@@ -143,18 +145,18 @@ Page {
                 x: Theme.horizontalPageMargin
                 width: parent.width - 2 * Theme.horizontalPageMargin
                 wrapMode: Text.Wrap
-                text: "Pushes playback above the system maximum for quiet outputs (e.g. Bluetooth). "
-                      + "A limiter tames the peaks so the extra loudness doesn't distort the way "
-                      + "raising the system volume past 100% does. 100% = off."
+                text: qsTr("Pushes playback above the system maximum for quiet outputs (e.g. Bluetooth). "
+                         + "A limiter tames the peaks so the extra loudness doesn't distort the way "
+                         + "raising the system volume past 100% does. 100% = off.")
                 color: Theme.secondaryColor
                 font.pixelSize: Theme.fontSizeExtraSmall
             }
 
             TextSwitch {
-                text: "Normalize volume"
-                description: "Even out loudness between tracks using YouTube's own per-song levels, "
-                             + "so you don't reach for the volume between songs. Fetched as each "
-                             + "track starts; songs without level data play unchanged."
+                text: qsTr("Normalize volume")
+                description: qsTr("Even out loudness between tracks using YouTube's own per-song levels, "
+                                  + "so you don't reach for the volume between songs. Fetched as each "
+                                  + "track starts; songs without level data play unchanged.")
                 automaticCheck: false
                 checked: app.backend.normalizeVolume
                 onClicked: app.backend.setNormalizeVolume(!app.backend.normalizeVolume)
@@ -167,8 +169,8 @@ Page {
                 maximumValue: 12
                 stepSize: 1
                 value: Math.round(app.backend.normMaxBoostDb)
-                label: "Max boost for quiet tracks"
-                valueText: value <= 0 ? "Off — only turn loud tracks down" : "+" + value + " dB"
+                label: qsTr("Max boost for quiet tracks")
+                valueText: value <= 0 ? qsTr("Off — only turn loud tracks down") : qsTr("+%1 dB").arg(value)
                 onReleased: {
                     app.backend.setNormMaxBoostDb(value)
                     value = Qt.binding(function() { return Math.round(app.backend.normMaxBoostDb) })
@@ -179,35 +181,35 @@ Page {
                 width: parent.width - 2 * Theme.horizontalPageMargin
                 visible: app.backend.normalizeVolume
                 wrapMode: Text.Wrap
-                text: "How far a quiet song may be turned up to reach the common level. Loud songs "
-                      + "are always turned down regardless. 0 dB matches YouTube (never boosts)."
+                text: qsTr("How far a quiet song may be turned up to reach the common level. Loud songs "
+                         + "are always turned down regardless. 0 dB matches YouTube (never boosts).")
                 color: Theme.secondaryColor
                 font.pixelSize: Theme.fontSizeExtraSmall
             }
 
             TextSwitch {
-                text: "Autoplay"
-                description: "When the queue ends, keep playing related songs (radio). "
-                             + "Turn off to stop at the end of the queue."
+                text: qsTr("Autoplay")
+                description: qsTr("When the queue ends, keep playing related songs (radio). "
+                                  + "Turn off to stop at the end of the queue.")
                 automaticCheck: false
                 checked: app.backend.autoplay
                 onClicked: app.backend.setAutoplay(!app.backend.autoplay)
             }
 
             TextSwitch {
-                text: "Skip disliked songs"
-                description: "Automatically skip songs you've disliked when autoplay picks the "
-                             + "next track."
+                text: qsTr("Skip disliked songs")
+                description: qsTr("Automatically skip songs you've disliked when autoplay picks the "
+                                  + "next track.")
                 automaticCheck: false
                 checked: app.backend.skipDisliked
                 onClicked: app.backend.setSkipDisliked(!app.backend.skipDisliked)
             }
 
-            SectionHeader { text: "Downloads" }
+            SectionHeader { text: qsTr("Downloads") }
 
             ValueButton {
-                label: "Folder"
-                value: app.backend.downloadDir ? app.backend.downloadDir : "App folder (default)"
+                label: qsTr("Folder")
+                value: app.backend.downloadDir ? app.backend.downloadDir : qsTr("App folder (default)")
                 onClicked: pageStack.animatorPush(folderPickerPage)
             }
 
@@ -218,9 +220,9 @@ Page {
                 text: page.dlError.length > 0
                       ? page.dlError
                       : (app.backend.downloadDir
-                         ? "Tracks are saved here. Tap Folder to change it."
-                         : "Tracks are saved in the app's own private folder by default — pick a "
-                           + "folder like Music or an SD card to find them in the file manager.")
+                         ? qsTr("Tracks are saved here. Tap Folder to change it.")
+                         : qsTr("Tracks are saved in the app's own private folder by default — pick a "
+                                + "folder like Music or an SD card to find them in the file manager."))
                 color: page.dlError.length > 0 ? Theme.errorColor : Theme.secondaryColor
                 font.pixelSize: Theme.fontSizeExtraSmall
             }
@@ -228,7 +230,7 @@ Page {
             Button {
                 visible: app.backend.downloadDir.length > 0
                 anchors.horizontalCenter: parent.horizontalCenter
-                text: "Reset to app folder"
+                text: qsTr("Reset to app folder")
                 onClicked: app.backend.setDownloadDir("", function(r) { page.dlError = "" })
             }
         }
@@ -241,7 +243,7 @@ Page {
         FolderPickerPage {
             onSelectedPathChanged: {
                 app.backend.setDownloadDir(selectedPath, function(r) {
-                    page.dlError = (r && r.ok === false) ? (r.error || "Couldn't use that folder.") : ""
+                    page.dlError = (r && r.ok === false) ? (r.error || qsTr("Couldn't use that folder.")) : ""
                 })
             }
         }

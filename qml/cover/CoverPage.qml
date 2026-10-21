@@ -53,7 +53,7 @@ CoverBackground {
         Label {
             width: parent.width
             horizontalAlignment: Text.AlignHCenter
-            text: cover.active ? "Now playing" : "FinTune"
+            text: cover.active ? qsTr("Now playing") : "FinTune"
             font.pixelSize: cover.active ? Theme.fontSizeExtraSmall : Theme.fontSizeLarge
             color: cover.active ? Theme.secondaryColor : Theme.highlightColor
         }

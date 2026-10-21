@@ -232,6 +232,44 @@ class ResolveSmoke(unittest.TestCase):
         self.assertFalse(res.get("ok"))
         self.assertIn("Sign in", res.get("error", ""))
 
+    def test_final_error_skips_the_widen_retry(self):
+        # A removed video is YouTube's final word: one extraction, not the widen re-run too.
+        calls = []
+        def fail_run(cmd, **kwargs):
+            calls.append(cmd)
+            return types.SimpleNamespace(
+                returncode=1, stdout="",
+                stderr="WARNING: [youtube] vid: some warning\n"
+                       "ERROR: [youtube] vid: Video unavailable. This video has been removed "
+                       "by the uploader")
+        youfish.subprocess.run = fail_run
+        res = youfish.resolve("vid")
+        self.assertFalse(res.get("ok"))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(res["error"], "Video unavailable. This video has been removed by the uploader")
+
+    def test_unclear_error_still_widens(self):
+        calls = []
+        def fail_run(cmd, **kwargs):
+            calls.append(cmd)
+            return types.SimpleNamespace(returncode=1, stdout="",
+                                         stderr="ERROR: [youtube] vid: Sign in to confirm you're not a bot")
+        youfish.subprocess.run = fail_run
+        youfish.resolve("vid")
+        self.assertEqual(len(calls), 2)
+
+    def test_ytdlp_err_keeps_the_reason_only(self):
+        e = youfish._ytdlp_err
+        self.assertEqual(e("ERROR: [youtube] Tq92D6wQ1mg: Sign in to confirm your age. Use "
+                           "--cookies-from-browser or --cookies for the authentication. See  "
+                           "https://github.com/yt-dlp/yt-dlp/wiki/FAQ for how", "x"),
+                         "Sign in to confirm your age.")
+        self.assertEqual(e("ERROR: Unable to download webpage: HTTP Error 429", "x"),
+                         "Unable to download webpage: HTTP Error 429")
+        self.assertEqual(e("", "resolve failed"), "resolve failed")
+        self.assertFalse(youfish._final_error("Video unavailable. This content isn't available, "
+                                              "try again later."))
+
 
 class ResolveCache(ResolveSmoke):
     """resolve() is cache-first: a repeat resolve is served from cache (no second yt-dlp spawn);
@@ -1381,6 +1419,31 @@ class DownloadQueueBatch(unittest.TestCase):
         self.assertEqual(res2["skipped"], 1)
         self.assertEqual(self._wait_for(3), 3)         # drain 'c' before teardown restores mocks
 
+    def test_a_track_already_on_its_way_is_not_queued_again(self):
+        # A repeat run found the finished file and failed trying to "resume" it.
+        with youfish._dl_pending_lock:
+            youfish._dl_pending.add("p")
+        try:
+            before = youfish._dl_queue.qsize()
+            self.assertEqual(youfish.download_many([{"videoId": "p", "title": "P"}])["queued"], [])
+            youfish.download("p", "P")
+            self.assertEqual(youfish._dl_queue.qsize(), before)
+        finally:
+            with youfish._dl_pending_lock:
+                youfish._dl_pending.discard("p")
+
+    def test_list_downloads_skips_damaged_entries(self):
+        good = os.path.join(self._tmp, "a.m4a")
+        open(good, "w").close()
+        with open(youfish._downloads_path(), "w") as f:
+            json.dump([{"id": "a", "kind": "audio", "path": good}, 1, "x", None], f)
+        self.assertEqual([d["id"] for d in youfish.list_downloads()], ["a"])
+
+    def test_safe_name_fits_the_filename_byte_limit(self):
+        name = youfish._safe_name("\u3042" * 200)
+        self.assertLessEqual(len(name.encode("utf-8")), 150)
+        self.assertTrue(name)
+
 
 class YtmIdentity(unittest.TestCase):
     """The self-healing InnerTube identity (ytm.py): scrape the live client version/key from the
@@ -1974,6 +2037,9 @@ class InnertubeParsing(unittest.TestCase):
         self.assertEqual(f("0:00 a\n1:00 b"), [])                   # need at least three
         self.assertEqual([c["title"] for c in f("Intro - 0:00\nMiddle - 2:00\nEnd - 1:00:00")],
                          ["Intro", "Middle", "End"])
+        # an emoji + VS16 + "(" before the digits (freeCodeCamp's "⌨️ (0:00) Introduction")
+        self.assertEqual([c["start_time"] for c in f("⌨️ (0:00) Intro\n⌨️ (1:45) Setup\n"
+                                                      "⌨️ (6:40) Hello")], [0, 105, 400])
 
     def test_configure_from_ytdlp_follows_jsless_default(self):
         class Policy:
@@ -2226,6 +2292,16 @@ class InnertubeEngineWiring(unittest.TestCase):
         self.assertEqual(fresh, "https://new/251")
         self.assertEqual([c for c in self.fake.calls if c[0] == "player"], [])
 
+    def test_reresolve_finds_a_fast_path_dub_track_under_ytdlp_naming(self):
+        # The fast path calls a dub "251-es.3"; yt-dlp numbers it "251-8" and keys it "251@es".
+        youfish._ytdlp_formats = lambda vid, anon=False: {"251-8": "https://new/es",
+                                                          "251@es": "https://new/es"}
+        old = "https://rr1.googlevideo.com/videoplayback?c=VISIONOS&itag=251&old=1"
+        self.assertEqual(youfish._reresolve("dQw4w9WgXcQ", "251-es.3", old, refused=True),
+                         "https://new/es")
+        self.assertEqual(youfish._track_alias("251-drc-en-US.4"), "251-drc@en-US")
+        self.assertIsNone(youfish._track_alias("251-8"))
+
     def test_drop_resolved_forgets_only_that_video(self):
         youfish._resolve_cache.update({
             "aaaaaaaaaaa\x1fvisionos\x1f0": {"payload": {}, "good_until": time.time() + 99, "ts": 0},
@@ -2325,6 +2401,69 @@ class YtmPlaylistContinuation(unittest.TestCase):
         self.pages["T9"] = self._page("d", 2, "T9")               # points at itself
         res = self.ytm.get_playlist("BID", limit=10000)
         self.assertEqual(len(res["tracks"]), 4)                   # 2 + 2, then a page adding nothing
+
+
+class YtmSweepFixes(unittest.TestCase):
+    """Search's top-result card, instrumental lyrics, podcast episodes and logout (bug sweep)."""
+
+    def setUp(self):
+        import ytm
+        self.ytm = ytm
+        self._orig = ytm._innertube
+        self._tmp = tempfile.mkdtemp(prefix="ytmsw-")
+        self._dd = ytm._data_dir
+        ytm._data_dir = lambda: self._tmp
+
+    def tearDown(self):
+        self.ytm._innertube = self._orig
+        self.ytm._data_dir = self._dd
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_search_leads_with_the_top_result_card(self):
+        card = {"musicCardShelfRenderer": {
+            "title": {"runs": [{"text": "Radiohead", "navigationEndpoint": {"browseEndpoint": {
+                "browseId": "UCr_iyUANcn9OX_yy9piYoLw",
+                "browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig": {
+                    "pageType": "MUSIC_PAGE_TYPE_ARTIST"}}}}}]},
+            "subtitle": {"runs": [{"text": "Artist"}]},
+            "contents": [YtmPlaylistContinuation._row("songsong001")]}}
+        self.ytm._innertube = lambda endpoint, body, **kw: {"contents": [card]}
+        items = self.ytm.search("radiohead")["items"]
+        self.assertEqual([(i["kind"], i.get("browseId") or i.get("videoId")) for i in items],
+                         [("artist", "UCr_iyUANcn9OX_yy9piYoLw"), ("song", "songsong001")])
+
+    def test_instrumental_is_an_answer(self):
+        r = self.ytm._lyrics_result({"instrumental": True})
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["instrumental"])
+        self.assertFalse(self.ytm._lyrics_result({})["ok"])
+
+    def test_podcast_page_lists_its_episodes(self):
+        ep = {"musicMultiRowListItemRenderer": {
+            "onTap": {"watchEndpoint": {"videoId": "episode0001"}},
+            "title": {"runs": [{"text": "Episode 1"}]},
+            "subtitle": {"runs": [{"text": "46K views"}, {"text": " \u2022 "}, {"text": "20h ago"}]},
+            "playbackProgress": {"musicPlaybackProgressRenderer": {
+                "durationText": {"runs": [{"text": " \u2022 "}, {"text": "30 min"}]}}}}}
+        self.ytm._innertube = lambda endpoint, body, **kw: {"contents": [{"musicShelfRenderer": {
+            "contents": [ep]}}]}
+        tracks = self.ytm.get_playlist("MPSPPLsomething")["tracks"]
+        self.assertEqual([(t["videoId"], t["title"], t["subtitle"]) for t in tracks],
+                         [("episode0001", "Episode 1", "46K views \u2022 20h ago \u2022 30 min")])
+
+    def test_logout_drops_the_personalised_home_cache(self):
+        for p in (self.ytm._home_cache_path(), self.ytm._cookies_path()):
+            with open(p, "w") as f:
+                f.write("{}")
+        self.ytm.logout()
+        self.assertFalse(os.path.exists(self.ytm._home_cache_path()))
+        self.assertFalse(os.path.exists(self.ytm._cookies_path()))
+
+    def test_a_token_refresh_racing_a_logout_writes_nothing_back(self):
+        self.ytm._save_tokens({"refresh_token": "R", "access_token": "old"})
+        self.ytm.logout()
+        self.ytm._save_tokens({"refresh_token": "R", "access_token": "new"}, only_if_current=True)
+        self.assertFalse(os.path.exists(self.ytm._tokens_path()))
 
 
 class YtmAtomicStores(unittest.TestCase):

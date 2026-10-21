@@ -27,12 +27,12 @@ Page {
         model: histModel
         bottomMargin: app.npActive ? Theme.itemSizeMedium : 0
 
-        header: PageHeader { title: "History" }
+        header: PageHeader { title: qsTr("History") }
 
         PullDownMenu {
             MenuItem {
-                text: "Clear history"
-                onClicked: Remorse.popupAction(page, "Clearing history", function() {
+                text: qsTr("Clear history")
+                onClicked: Remorse.popupAction(page, qsTr("Clearing history"), function() {
                     app.backend.musicClearHistory(function() { page.reload() })
                 })
             }
@@ -47,17 +47,17 @@ Page {
 
             menu: ContextMenu {
                 MenuItem {
-                    text: "Play next"
+                    text: qsTr("Play next")
                     onClicked: app.queueInsertNext({ videoId: model.videoId, title: model.title,
                         subtitle: model.subtitle, thumb: model.thumb, artistId: model.artistId })
                 }
                 MenuItem {
-                    text: "Add to queue"
+                    text: qsTr("Add to queue")
                     onClicked: app.queueAppend({ videoId: model.videoId, title: model.title,
                         subtitle: model.subtitle, thumb: model.thumb, artistId: model.artistId })
                 }
                 MenuItem {
-                    text: "Add to playlist"
+                    text: qsTr("Add to playlist")
                     onClicked: app.addToPlaylist({ videoId: model.videoId, title: model.title,
                         subtitle: model.subtitle, thumb: model.thumb, artistId: model.artistId })
                 }
@@ -106,8 +106,8 @@ Page {
 
         ViewPlaceholder {
             enabled: !page.loading && histModel.count === 0
-            text: "No history yet"
-            hintText: "Tracks you play show up here."
+            text: qsTr("No history yet")
+            hintText: qsTr("Tracks you play show up here.")
         }
 
         VerticalScrollDecorator { }

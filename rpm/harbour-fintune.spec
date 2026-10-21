@@ -1,7 +1,7 @@
 Name:       harbour-fintune
 Summary:    A YouTube Music client for Sailfish OS
-Version:    1.3.0
-Release:    2
+Version:    1.3.1
+Release:    1
 License:    GPLv3
 URL:        https://github.com/sandstorm244/harbour-fintune
 Source0:    %{name}-%{version}.tar.bz2
@@ -27,6 +27,8 @@ BuildRequires:  pkgconfig(gstreamer-video-1.0)
 BuildRequires:  pkgconfig(egl)
 BuildRequires:  pkgconfig(nemo-gstreamer-interfaces-1.0)
 BuildRequires:  desktop-file-utils
+# lupdate/lrelease for the translations (CONFIG += sailfishapp_i18n).
+BuildRequires:  qt5-qttools-linguist
 
 %description
 FinTune is a native Sailfish OS client for YouTube Music. It browses YouTube

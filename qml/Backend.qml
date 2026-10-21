@@ -84,8 +84,10 @@ Item {
     property var ytmAccounts: []         // [{name,handle,thumb,authuser,page_id,datasync_id,selected}]
     property string ytmSelectedName: ""  // display name of the selected identity ("" = default)
 
-    signal resolved(var info)
-    signal resolveError(string message)
+    // forId = the video id the result is for, so a late answer for a track the user already
+    // moved off can be dropped instead of playing (or skipping) the wrong one.
+    signal resolved(var info, string forId)
+    signal resolveError(string message, string forId)
     signal updateFinished(bool ok, string message)
     signal downloadProgress(string videoId, string kind, real percent)
     signal downloadFinished(string videoId, string kind, bool ok, string message)
@@ -102,8 +104,8 @@ Item {
         // browse/home fetch (or a dammed background job) would make a track tap wait its turn.
         var lane = backend.fastLaneReady ? pyFast : py
         lane.call("youfish.resolve", [videoId], function(res) {
-            if (res && res.ok) backend.resolved(res.info)
-            else backend.resolveError(res ? res.error : "resolve failed")
+            if (res && res.ok) backend.resolved(res.info, videoId)
+            else backend.resolveError(res ? res.error : qsTr("resolve failed"), videoId)
         })
     }
 
@@ -155,15 +157,18 @@ Item {
     function musicSearch(query) {
         if (!query) return
         py.call("ytm.search", [query, 40], function(res) {
-            if (res && res.items) backend.musicResults(res.items)
-            else backend.musicError(res && res.error ? res.error : "search failed")
+            // error first: an empty items array is truthy, which would hide {items: [], error}
+            if (res && res.error && !(res.items && res.items.length > 0))
+                backend.musicError(res.error)
+            else if (res && res.items) backend.musicResults(res.items)
+            else backend.musicError(qsTr("search failed"))
         })
     }
 
     // Home shelves — personalized when signed in, generic otherwise. Emits musicHomeLoaded.
     function musicHome() {
         py.call("ytm.get_home", [], function(res) {
-            if (!res) { backend.musicError("couldn't load home"); return }
+            if (!res) { backend.musicError(qsTr("couldn't load home")); return }
             backend.ytmLoggedIn = !!res.logged_in
             backend.musicHomeLoaded(res.shelves || [], !!res.logged_in)
         })
@@ -247,7 +252,7 @@ Item {
         backend.ytmLoginActive = true
         backend.ytmLoginCode = ""
         backend.ytmLoginUrl = ""
-        backend.ytmLoginMsg = "Requesting a code…"
+        backend.ytmLoginMsg = qsTr("Requesting a code…")
         py.call("ytm.login_begin", [], function() {})
     }
 
@@ -300,14 +305,14 @@ Item {
     // copy-paste (FinTune is unsandboxed, so it can read the browser's cookies). Requires the
     // user to be signed in to music.youtube.com in the Sailfish browser.
     function ytmImportBrowserLogin() {
-        backend.ytmLoginMsg = "Importing from browser…"
+        backend.ytmLoginMsg = qsTr("Importing from browser…")
         py.call("ytm.import_browser_login", [], function(res) {
             if (res && res.ok && res.live === false) {
                 // Cookies imported, but Google rejects the session — the browser session is stale.
                 backend.ytmLoggedIn = false
                 backend.ytmSessionState = "expired"
                 backend.ytmAccount = ""
-                backend.ytmLoginMsg = res.warning || "Imported, but the session looks signed out."
+                backend.ytmLoginMsg = res.warning || qsTr("Imported, but the session looks signed out.")
                 backend.ytmLoginFinished(false, backend.ytmLoginMsg)
             } else if (res && res.ok) {
                 backend.ytmLoggedIn = true
@@ -316,11 +321,11 @@ Item {
                 backend.ytmAccounts = []          // fresh session → re-enumerate on demand
                 backend.ytmSelectedName = ""      // and back to the default identity
                 backend.ytmLoginMsg = res.account
-                    ? ("Signed in as " + res.account + ".")
-                    : ("Imported " + (res.count || 0) + " cookies.")
+                    ? qsTr("Signed in as %1.").arg(res.account)
+                    : qsTr("Imported %n cookie(s).", "", res.count || 0)
                 backend.ytmLoginFinished(true, "")
             } else {
-                backend.ytmLoginMsg = (res && res.error) ? res.error : "Import failed."
+                backend.ytmLoginMsg = (res && res.error) ? res.error : qsTr("Import failed.")
                 backend.ytmLoginFinished(false, backend.ytmLoginMsg)
             }
         })
@@ -526,7 +531,7 @@ Item {
                 backend.ready = res.version.length > 0
             }
             backend.updateFinished(!!(res && res.ok),
-                res ? (res.output || res.error || "") : "update failed")
+                res ? (res.output || res.error || "") : qsTr("update failed"))
         })
     }
 
@@ -557,7 +562,7 @@ Item {
         if (backend.fastResolveInstalling) return
         backend.fastResolveInstalling = true
         backend.fastResolvePct = 0
-        backend.fastResolveStatusMsg = "Downloading the importable yt-dlp…"
+        backend.fastResolveStatusMsg = qsTr("Downloading the importable yt-dlp…")
         py.call("youfish.install_ytdlp_zipapp", [], function() {})
     }
 
@@ -594,7 +599,7 @@ Item {
     function installPotProvider() {
         if (backend.potInstalling) return
         backend.potInstalling = true
-        backend.potStatusMsg = "Starting…"
+        backend.potStatusMsg = qsTr("Starting…")
         py.call("youfish.install_pot_provider", [], function() {})
     }
     // Resolve the latest provider release from GitHub + (re)install it. User-initiated, so the
@@ -602,7 +607,7 @@ Item {
     function updatePotProvider() {
         if (backend.potInstalling) return
         backend.potInstalling = true
-        backend.potStatusMsg = "Checking for the latest provider…"
+        backend.potStatusMsg = qsTr("Checking for the latest provider…")
         py.call("youfish.update_pot_provider", [], function() {})
     }
     function setPotEnabled(on) {
@@ -711,16 +716,16 @@ Item {
             else if (data[0] === "ytm_login_code") {
                 backend.ytmLoginCode = data[1]
                 backend.ytmLoginUrl = data[2]
-                backend.ytmLoginMsg = "Enter this code to sign in."
+                backend.ytmLoginMsg = qsTr("Enter this code to sign in.")
             }
             else if (data[0] === "ytm_login_done") {
                 backend.ytmLoginActive = false
                 backend.ytmLoginCode = ""
                 if (data[1]) {
                     backend.ytmLoggedIn = true
-                    backend.ytmLoginMsg = "Signed in."
+                    backend.ytmLoginMsg = qsTr("Signed in.")
                 } else {
-                    backend.ytmLoginMsg = data[2] || "Login failed."
+                    backend.ytmLoginMsg = data[2] || qsTr("Login failed.")
                 }
                 backend.ytmLoginFinished(!!data[1], data[2] || "")
             }

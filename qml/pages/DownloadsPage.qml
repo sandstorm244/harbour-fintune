@@ -43,7 +43,7 @@ Page {
         header: Column {
             width: list.width
 
-            PageHeader { title: "Downloads" }
+            PageHeader { title: qsTr("Downloads") }
 
             // In-progress downloads.
             Repeater {
@@ -86,7 +86,7 @@ Page {
 
             menu: ContextMenu {
                 MenuItem {
-                    text: "Remove download"
+                    text: qsTr("Remove download")
                     onClicked: app.backend.deleteDownload(modelData.id, "audio")
                 }
             }
@@ -136,8 +136,8 @@ Page {
 
         ViewPlaceholder {
             enabled: page.items.length === 0 && page.activeList.length === 0
-            text: "No downloads"
-            hintText: "Long-press a song and choose Download to save it for offline play."
+            text: qsTr("No downloads")
+            hintText: qsTr("Long-press a song and choose Download to save it for offline play.")
         }
 
         VerticalScrollDecorator { }

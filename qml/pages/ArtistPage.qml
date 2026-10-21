@@ -28,9 +28,9 @@ Page {
                 if (res.name && res.name.length > 0)
                     page.artistName = res.name
                 if (page.songs.length === 0 && page.shelves.length === 0)
-                    page.errorText = "Nothing to show for this artist."
+                    page.errorText = qsTr("Nothing to show for this artist.")
             } else {
-                page.errorText = (res && res.error) ? res.error : "Couldn't load this artist."
+                page.errorText = (res && res.error) ? res.error : qsTr("Couldn't load this artist.")
             }
         })
     }
@@ -44,7 +44,7 @@ Page {
             width: parent.width
             spacing: Theme.paddingMedium
 
-            PageHeader { title: page.artistName || "Artist" }
+            PageHeader { title: page.artistName || qsTr("Artist") }
 
             BusyIndicator {
                 anchors.horizontalCenter: parent.horizontalCenter
@@ -63,7 +63,7 @@ Page {
             }
 
             // --- Top songs ---
-            SectionHeader { text: "Songs"; visible: page.songs.length > 0 }
+            SectionHeader { text: qsTr("Songs"); visible: page.songs.length > 0 }
 
             Repeater {
                 model: page.songs
@@ -74,18 +74,18 @@ Page {
                     onClicked: app.playQueueList(page.songs, index)
 
                     menu: ContextMenu {
-                        MenuItem { text: "Play next"; onClicked: app.queueInsertNext(modelData) }
-                        MenuItem { text: "Add to queue"; onClicked: app.queueAppend(modelData) }
-                        MenuItem { text: "Add to playlist"; onClicked: app.addToPlaylist(modelData) }
+                        MenuItem { text: qsTr("Play next"); onClicked: app.queueInsertNext(modelData) }
+                        MenuItem { text: qsTr("Add to queue"); onClicked: app.queueAppend(modelData) }
+                        MenuItem { text: qsTr("Add to playlist"); onClicked: app.addToPlaylist(modelData) }
                         MenuItem {
-                            text: app.isDownloaded(modelData.videoId) ? "Remove download" : "Download"
+                            text: app.isDownloaded(modelData.videoId) ? qsTr("Remove download") : qsTr("Download")
                             onClicked: app.isDownloaded(modelData.videoId)
                                        ? app.backend.deleteDownload(modelData.videoId, "audio")
                                        : app.downloadTrack(modelData)
                         }
-                        MenuItem { text: "Like"
+                        MenuItem { text: qsTr("Like")
                             onClicked: app.backend.musicRate(modelData.videoId, "LIKE") }
-                        MenuItem { text: "Dislike"
+                        MenuItem { text: qsTr("Dislike")
                             onClicked: app.backend.musicRate(modelData.videoId, "DISLIKE") }
                     }
 
@@ -139,11 +139,11 @@ Page {
                 visible: page.songsMore.browseId.length > 0
                 onClicked: pageStack.push(Qt.resolvedUrl("PlaylistPage.qml"),
                     { browseId: page.songsMore.browseId, browseParams: page.songsMore.params,
-                      playlistTitle: (page.artistName || "Artist") + " — Songs" })
+                      playlistTitle: qsTr("%1 — Songs").arg(page.artistName || qsTr("Artist")) })
                 Label {
                     x: Theme.horizontalPageMargin
                     anchors.verticalCenter: parent.verticalCenter
-                    text: "Show all songs"
+                    text: qsTr("Show all songs")
                     color: parent.highlighted ? Theme.highlightColor : Theme.highlightColor
                     font.pixelSize: Theme.fontSizeSmall
                 }

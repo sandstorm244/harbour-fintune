@@ -31,9 +31,9 @@ Page {
                 if (res.title && res.title.length > 0)
                     page.playlistTitle = res.title
                 if (page.tracks.length === 0)
-                    page.errorText = "No tracks here."
+                    page.errorText = qsTr("No tracks here.")
             } else {
-                page.errorText = (res && res.error) ? res.error : "Couldn't load this."
+                page.errorText = (res && res.error) ? res.error : qsTr("Couldn't load this.")
             }
         })
     }
@@ -45,15 +45,15 @@ Page {
 
         PullDownMenu {
             MenuItem {
-                text: "Download all"
+                text: qsTr("Download all")
                 enabled: page.tracks.length > 0
                 // A remorse timer gives a cancel window before a big batch starts — handy given
                 // downloads are serial + paced (a long playlist takes a while).
-                onClicked: dlRemorse.execute("Downloading " + page.tracks.length + " songs",
+                onClicked: dlRemorse.execute(qsTr("Downloading %n song(s)", "", page.tracks.length),
                                              function() { app.downloadAll(page.tracks) })
             }
             MenuItem {
-                text: "Play all"
+                text: qsTr("Play all")
                 enabled: page.tracks.length > 0
                 onClicked: app.playQueueList(page.tracks, 0)
             }
@@ -61,7 +61,7 @@ Page {
 
         header: Column {
             width: list.width
-            PageHeader { title: page.playlistTitle || "Playlist" }
+            PageHeader { title: page.playlistTitle || qsTr("Playlist") }
             BusyIndicator {
                 anchors.horizontalCenter: parent.horizontalCenter
                 size: BusyIndicatorSize.Large
@@ -88,18 +88,18 @@ Page {
             onClicked: app.playQueueList(page.tracks, index)
 
             menu: ContextMenu {
-                MenuItem { text: "Play next"; onClicked: app.queueInsertNext(modelData) }
-                MenuItem { text: "Add to queue"; onClicked: app.queueAppend(modelData) }
-                MenuItem { text: "Add to playlist"; onClicked: app.addToPlaylist(modelData) }
+                MenuItem { text: qsTr("Play next"); onClicked: app.queueInsertNext(modelData) }
+                MenuItem { text: qsTr("Add to queue"); onClicked: app.queueAppend(modelData) }
+                MenuItem { text: qsTr("Add to playlist"); onClicked: app.addToPlaylist(modelData) }
                 MenuItem {
-                    text: app.isDownloaded(modelData.videoId) ? "Remove download" : "Download"
+                    text: app.isDownloaded(modelData.videoId) ? qsTr("Remove download") : qsTr("Download")
                     onClicked: app.isDownloaded(modelData.videoId)
                                ? app.backend.deleteDownload(modelData.videoId, "audio")
                                : app.downloadTrack(modelData)
                 }
-                MenuItem { text: "Like"
+                MenuItem { text: qsTr("Like")
                     onClicked: app.backend.musicRate(modelData.videoId, "LIKE") }
-                MenuItem { text: "Dislike"
+                MenuItem { text: qsTr("Dislike")
                     onClicked: app.backend.musicRate(modelData.videoId, "DISLIKE") }
             }
 
@@ -148,7 +148,7 @@ Page {
 
         ViewPlaceholder {
             enabled: !page.loading && page.tracks.length === 0 && page.errorText.length === 0
-            text: "Empty"
+            text: qsTr("Empty")
         }
 
         VerticalScrollDecorator { }

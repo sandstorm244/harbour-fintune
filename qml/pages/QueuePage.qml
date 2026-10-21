@@ -14,12 +14,12 @@ Page {
 
         PullDownMenu {
             MenuItem {
-                text: app.shuffle ? "Shuffle: on" : "Shuffle: off"
+                text: app.shuffle ? qsTr("Shuffle: on") : qsTr("Shuffle: off")
                 onClicked: app.setShuffle(!app.shuffle)
             }
         }
 
-        header: PageHeader { title: "Up next" }
+        header: PageHeader { title: qsTr("Up next") }
         model: app.playQueue
 
         delegate: ListItem {
@@ -29,23 +29,24 @@ Page {
             onClicked: app.playQueueJump(index)
 
             menu: ContextMenu {
-                MenuItem { text: "Add to playlist"; onClicked: app.addToPlaylist(modelData) }
+                MenuItem { text: qsTr("Add to playlist"); onClicked: app.addToPlaylist(modelData) }
                 MenuItem {
-                    text: app.isDownloaded(modelData.videoId) ? "Remove download" : "Download"
+                    text: app.isDownloaded(modelData.videoId) ? qsTr("Remove download") : qsTr("Download")
                     onClicked: app.isDownloaded(modelData.videoId)
                                ? app.backend.deleteDownload(modelData.videoId, "audio")
                                : app.downloadTrack(modelData)
                 }
                 MenuItem {
-                    text: "Like"
+                    //: Rate the song thumbs-up
+                text: qsTr("Like")
                     onClicked: app.backend.musicRate(modelData.videoId, "LIKE")
                 }
                 MenuItem {
-                    text: "Dislike"
+                    text: qsTr("Dislike")
                     onClicked: app.backend.musicRate(modelData.videoId, "DISLIKE")
                 }
                 MenuItem {
-                    text: "Remove from queue"
+                    text: qsTr("Remove from queue")
                     visible: index !== app.playQueueIndex
                     onClicked: app.queueRemove(index)
                 }
@@ -105,7 +106,7 @@ Page {
 
         ViewPlaceholder {
             enabled: app.playQueue.length === 0
-            text: "Nothing queued"
+            text: qsTr("Nothing queued")
         }
 
         VerticalScrollDecorator { }

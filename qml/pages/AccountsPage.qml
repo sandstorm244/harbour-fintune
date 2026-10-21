@@ -19,7 +19,7 @@ Page {
         app.backend.ytmListAccounts(function(res) {
             page.loading = false
             if (res && !res.ok)
-                page.errorText = res.error || "Couldn't load the account list."
+                page.errorText = res.error || qsTr("Couldn't load the account list.")
         })
     }
 
@@ -30,12 +30,12 @@ Page {
         model: app.backend.ytmAccounts
 
         PullDownMenu {
-            MenuItem { text: "Reload"; onClicked: page.reload() }
+            MenuItem { text: qsTr("Reload"); onClicked: page.reload() }
         }
 
         header: Column {
             width: parent.width
-            PageHeader { title: "Account" }
+            PageHeader { title: qsTr("Account") }
             Label {
                 x: Theme.horizontalPageMargin
                 width: parent.width - 2 * Theme.horizontalPageMargin
@@ -99,16 +99,16 @@ Page {
                     if (res && res.ok)
                         pageStack.pop()
                     else
-                        page.errorText = (res && res.error) ? res.error : "Couldn't switch account."
+                        page.errorText = (res && res.error) ? res.error : qsTr("Couldn't switch account.")
                 })
             }
         }
 
         ViewPlaceholder {
             enabled: !page.loading && app.backend.ytmAccounts.length === 0
-            text: page.errorText.length > 0 ? page.errorText : "No accounts found"
+            text: page.errorText.length > 0 ? page.errorText : qsTr("No accounts found")
             hintText: app.backend.ytmLoggedIn
-                      ? "Pull down to reload" : "Sign in first (Settings → Account)"
+                      ? qsTr("Pull down to reload") : qsTr("Sign in first (Settings → Account)")
         }
 
         VerticalScrollDecorator { }
