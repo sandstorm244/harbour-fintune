@@ -111,42 +111,42 @@
 <context>
     <name>Backend</name>
     <message>
-        <location filename="../qml/Backend.qml" line="108"/>
+        <location filename="../qml/Backend.qml" line="109"/>
         <source>resolve failed</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/Backend.qml" line="164"/>
+        <location filename="../qml/Backend.qml" line="165"/>
         <source>search failed</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/Backend.qml" line="171"/>
+        <location filename="../qml/Backend.qml" line="172"/>
         <source>couldn&apos;t load home</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/Backend.qml" line="255"/>
+        <location filename="../qml/Backend.qml" line="256"/>
         <source>Requesting a code…</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/Backend.qml" line="308"/>
+        <location filename="../qml/Backend.qml" line="309"/>
         <source>Importing from browser…</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/Backend.qml" line="315"/>
+        <location filename="../qml/Backend.qml" line="316"/>
         <source>Imported, but the session looks signed out.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/Backend.qml" line="324"/>
+        <location filename="../qml/Backend.qml" line="325"/>
         <source>Signed in as %1.</source>
         <translation type="unfinished"></translation>
     </message>
     <message numerus="yes">
-        <location filename="../qml/Backend.qml" line="325"/>
+        <location filename="../qml/Backend.qml" line="326"/>
         <source>Imported %n cookie(s).</source>
         <translation>
             <numerusform>Imported %n cookie.</numerusform>
@@ -154,42 +154,42 @@
         </translation>
     </message>
     <message>
-        <location filename="../qml/Backend.qml" line="328"/>
+        <location filename="../qml/Backend.qml" line="329"/>
         <source>Import failed.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/Backend.qml" line="534"/>
+        <location filename="../qml/Backend.qml" line="535"/>
         <source>update failed</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/Backend.qml" line="565"/>
+        <location filename="../qml/Backend.qml" line="566"/>
         <source>Downloading the importable yt-dlp…</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/Backend.qml" line="602"/>
+        <location filename="../qml/Backend.qml" line="604"/>
         <source>Starting…</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/Backend.qml" line="610"/>
+        <location filename="../qml/Backend.qml" line="612"/>
         <source>Checking for the latest provider…</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/Backend.qml" line="719"/>
+        <location filename="../qml/Backend.qml" line="721"/>
         <source>Enter this code to sign in.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/Backend.qml" line="726"/>
+        <location filename="../qml/Backend.qml" line="728"/>
         <source>Signed in.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/Backend.qml" line="728"/>
+        <location filename="../qml/Backend.qml" line="730"/>
         <source>Login failed.</source>
         <translation type="unfinished"></translation>
     </message>
@@ -704,7 +704,7 @@
     <name>ProvidersPage</name>
     <message>
         <location filename="../qml/pages/ProvidersPage.qml" line="48"/>
-        <location filename="../qml/pages/ProvidersPage.qml" line="347"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="355"/>
         <source>Setting up…</source>
         <translation type="unfinished"></translation>
     </message>
@@ -809,184 +809,189 @@
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="157"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="159"/>
         <source>Use nightly builds</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="158"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="160"/>
         <source>Nightly yt-dlp ships fixes for YouTube breakages days sooner, at the cost of less testing. Applies on the next Update.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="169"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="171"/>
         <source>Player client</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="170"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="172"/>
         <source>How yt-dlp identifies to YouTube. If a track won&apos;t play, try TV or iOS — several clients stream without a PO token.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="176"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="178"/>
         <source>Auto (yt-dlp default)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="177"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="179"/>
         <source>TV</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="178"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="180"/>
         <source>iOS</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="179"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="181"/>
         <source>Android VR</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="180"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="182"/>
         <source>Mobile web</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="181"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="183"/>
         <source>Web</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="201"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="203"/>
         <source>Fast resolve unavailable: needs OS Python 3.10 or newer to run yt-dlp in-process — this device has %1. The self-contained binary (with its own bundled Python) is used instead.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="204"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="206"/>
         <source>an older one</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="206"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="208"/>
         <source>Fast resolve: downloading the importable yt-dlp… %1%</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="209"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="211"/>
         <source>Fast resolve active — yt-dlp %1 runs in-process for instant track starts. Any error falls back to the binary above.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="212"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="214"/>
         <source>Fast resolve: the importable copy isn&apos;t here yet — it downloads automatically, or rides along with the next Update.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="241"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="243"/>
         <source>Fast-resolve copy (%1) is out of step with the yt-dlp binary (%2) — tap Update above to refresh both.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="247"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="249"/>
         <source>PO token provider</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="253"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="256"/>
+        <source>Not available on this phone: the provider runs on Deno, and Deno has no 32-bit ARM build. Tracks play through the clients that need no token, which covers most of them.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../qml/pages/ProvidersPage.qml" line="259"/>
         <source>YouTube now demands a fresh proof-of-origin token per video. This sets up the bgutil provider (v%1): a small Deno helper that mints one automatically for each track, so you get full quality instead of 403s.
 
 It runs sandboxed by Deno: network only, no file writes, no subprocesses, no native code, and it can&apos;t read anything outside its own folder. Opt-in — nothing is downloaded unless you tap Set up.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="306"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="313"/>
         <source>Downloading Deno… %1%</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="307"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="314"/>
         <source>Update Deno</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="307"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="314"/>
         <source>Download Deno</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="330"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="337"/>
         <source>Deno found: %1</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="337"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="344"/>
         <source>Use PO token provider</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="338"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="345"/>
         <source>Fetch a per-video token so age/robot-gated tracks return full quality.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="348"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="356"/>
         <source>Reinstall provider</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="348"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="356"/>
         <source>Set up provider</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="356"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="364"/>
         <source>Update to latest</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="361"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="369"/>
         <source>Diagnostics</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="368"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="376"/>
         <source>InnerTube client: %1 (auto-detected)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="369"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="377"/>
         <source>InnerTube client: %1 (shipped default)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="379"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="387"/>
         <source>A full report of what the app can see: which binaries were found, whether the token server is alive and answering, and the tail of its log. Copy it if you need help getting the provider working.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="388"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="396"/>
         <source>Run diagnostics</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="391"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="399"/>
         <source>Running…</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="394"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="402"/>
         <source>No report.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="404"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="412"/>
         <source>Provider report</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/pages/ProvidersPage.qml" line="413"/>
+        <location filename="../qml/pages/ProvidersPage.qml" line="421"/>
         <source>Copy report</source>
         <translation type="unfinished"></translation>
     </message>

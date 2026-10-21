@@ -55,6 +55,12 @@ C++ GStreamer player.
   provider all install and update from the Providers page after a confirmation
   tap. Nothing to preinstall; a YouTube-side breakage is a tap, not a release.
 
+**32-bit phones (armv7hl):** releases include an armv7hl RPM. The app fetches the 32-bit
+yt-dlp build there and keeps it on the stable channel (no nightly build exists for 32-bit ARM).
+The PO-token provider is unavailable because Deno has no 32-bit build; tracks play through the
+clients that need no token. This build is tested in the SDK's armv7hl emulator, not on a real
+32-bit phone — reports welcome.
+
 ## Build
 
 With the Sailfish SDK (`sfdk`) configured. Shadow build (recommended — RPM lands in

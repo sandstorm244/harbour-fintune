@@ -407,6 +407,15 @@ against the same shared C++ EQ API.
   controls overlay, which FinTune has no equivalent of. If you add a full-bleed overlay
   here, copy the guard pattern from FinTube's `VideoPage.qml`, don't assume Qt 5.7+ is
   safe.
+- **32-bit ARM userland (`_ARM32`)** is detected from the interpreter's pointer size, never
+  uname: armv7hl images often run on a 64-bit kernel that reports `aarch64`. There yt-dlp is
+  the stable-only `yt-dlp_linux_armv7l.zip` one-directory build, unpacked to
+  `bin/yt-dlp-armv7l/` behind a `bin/yt-dlp` symlink (`_unpack_ytdlp_dir`); it can't self-update,
+  so `ytdlp_update` re-downloads when the latest tag differs (`_ytdlp_update_by_download`).
+  `_ytdlp_channel()` pins stable (keeps the zipapp in lockstep). Deno/PO token are refused
+  (`_ARM32_NO_DENO`; `pot_status().arm32` hides the setup in the UI). Same code as FinTube.
+  Verified only under the SDK armv7hl target (`sfdk engine exec sb2 -t
+  SailfishOS-5.1.0.11-armv7hl.default python3 …`), never on hardware. CI builds aarch64 + armv7hl.
 - **Every user-visible QML string goes through `qsTr()`** (`CONFIG += sailfishapp_i18n`; the build's
   lupdate refreshes `translations/*.ts`). Use `.arg()` for values, never `+` concatenation; `%n` for
   counts (`qsTr("%n song(s)", "", n)`) — `translations/harbour-fintune-en.ts` supplies the English
