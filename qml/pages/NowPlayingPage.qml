@@ -1,6 +1,7 @@
 import QtQuick 2.0
 import Sailfish.Silica 1.0
 import QtGraphicalEffects 1.0
+import "../logic.js" as Logic
 
 // Now Playing — a view of the app's global audio engine (app.player). Navigating away
 // doesn't stop playback; this page just reflects and controls it.
@@ -208,7 +209,7 @@ Page {
                     icon.source: "image://theme/icon-m-repeat?"
                                  + (app.repeatMode > 0 ? Theme.highlightColor
                                                        : Theme.secondaryColor)
-                    onClicked: app.repeatMode = (app.repeatMode + 1) % 3
+                    onClicked: app.repeatMode = Logic.nextRepeatMode(app.repeatMode)
                     Label {
                         anchors {
                             right: parent.right; rightMargin: Theme.paddingSmall

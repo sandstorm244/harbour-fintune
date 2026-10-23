@@ -1,5 +1,6 @@
 import QtQuick 2.0
 import io.thp.pyotherside 1.5
+import "logic.js" as Logic
 
 // Non-visual wrapper around the Python module. All calls are async and run off
 // the UI thread (PyOtherSide worker), which is what we want for yt-dlp subprocess
@@ -159,10 +160,9 @@ Item {
         if (!query) return
         py.call("ytm.search", [query, 40], function(res) {
             // error first: an empty items array is truthy, which would hide {items: [], error}
-            if (res && res.error && !(res.items && res.items.length > 0))
-                backend.musicError(res.error)
-            else if (res && res.items) backend.musicResults(res.items)
-            else backend.musicError(qsTr("search failed"))
+            var r = Logic.searchOutcome(res)
+            if (r.items) backend.musicResults(r.items)
+            else backend.musicError(r.error || qsTr("search failed"))
         })
     }
 
@@ -199,10 +199,11 @@ Item {
     // Callback gets {ok, account, checked}. Reports the account name on success.
     function verifySession(callback) {
         py.call("ytm.verify_session", [], function(res) {
-            if (res && res.checked) {
-                backend.ytmLoggedIn = !!res.ok
-                backend.ytmSessionState = res.present ? (res.ok ? "live" : "expired") : ""
-                backend.ytmAccount = res.ok ? (res.account || "") : ""
+            var st = Logic.sessionFromVerify(res)
+            if (st) {
+                backend.ytmLoggedIn = st.loggedIn
+                backend.ytmSessionState = st.state
+                backend.ytmAccount = st.account
             }
             // res.checked === false is INCONCLUSIVE (offline) — leave the last known state alone.
             if (callback) callback(res || {})
@@ -308,14 +309,15 @@ Item {
     function ytmImportBrowserLogin() {
         backend.ytmLoginMsg = qsTr("Importing from browser…")
         py.call("ytm.import_browser_login", [], function(res) {
-            if (res && res.ok && res.live === false) {
+            var outcome = Logic.importOutcome(res)
+            if (outcome === "stale") {
                 // Cookies imported, but Google rejects the session — the browser session is stale.
                 backend.ytmLoggedIn = false
                 backend.ytmSessionState = "expired"
                 backend.ytmAccount = ""
                 backend.ytmLoginMsg = res.warning || qsTr("Imported, but the session looks signed out.")
                 backend.ytmLoginFinished(false, backend.ytmLoginMsg)
-            } else if (res && res.ok) {
+            } else if (outcome === "ok") {
                 backend.ytmLoggedIn = true
                 backend.ytmSessionState = "live"
                 backend.ytmAccount = res.account || ""

@@ -80,12 +80,18 @@ Install: `rpm -U --force harbour-fintune-<ver>.aarch64.rpm`
 
 ## Tests
 
-Offline unit tests for the audio engine — externals mocked, no device, network, or
-yt-dlp needed:
+Offline tests for the engine and for the app's queue and player decisions. No device, network or
+yt-dlp needed; the QML half needs Node.js:
 
 ```sh
-python3 python/test_youfish.py
+sh test.sh
 ```
+
+`python3 tests/live_ytdlp.py` checks the app against the real, current yt-dlp and live
+YouTube (needs the network; `--pot` adds the PO-token provider).
+
+[TESTING.md](TESTING.md) has the release procedure (beta tag first) and the on-device checklist
+for everything the tests can't reach.
 
 ## Translating
 

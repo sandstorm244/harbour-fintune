@@ -1,6 +1,7 @@
 import QtQuick 2.0
 import Sailfish.Silica 1.0
 import QtGraphicalEffects 1.0
+import "../logic.js" as Logic
 
 // FinTune home: recommendation shelves (personalized once signed in, generic otherwise),
 // rendered as horizontal carousels. Tapping a song plays it through the app's audio engine.
@@ -19,8 +20,9 @@ Page {
         // Instant: render the cached shelves first (if we don't already have any), then refresh
         // from the network in the background. Cold start still shows the big spinner.
         app.backend.musicHomeCached(function(res) {
-            if (res && res.shelves && res.shelves.length > 0 && page.shelves.length === 0) {
-                page.shelves = res.shelves
+            var cached = Logic.cachedShelves(page.shelves, res ? res.shelves : null)
+            if (cached) {
+                page.shelves = cached
                 page.loading = false
             }
             if (page.shelves.length === 0)
@@ -34,8 +36,7 @@ Page {
         target: app.backend
         onMusicHomeLoaded: {
             page.loading = false
-            if (shelves.length > 0)
-                page.shelves = shelves   // fresh replaces cached; keep cached if fresh is empty
+            page.shelves = Logic.freshShelves(page.shelves, shelves)   // keep cached if fresh is empty
         }
         onMusicError: {
             page.loading = false

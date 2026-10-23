@@ -3,6 +3,7 @@ import Sailfish.Silica 1.0
 import FinTune 1.0
 import "pages"
 import "cover"
+import "logic.js" as Logic
 
 // FinTune — native YouTube Music for Sailfish OS.
 //
@@ -174,25 +175,13 @@ ApplicationWindow {
         if (!videoId || app.radioLoading || !backend.autoplay)
             return
         app.radioLoading = true
+        var snap = Logic.radioSnapshot(app.playQueue, "")      // the one-song queue playSong set
         backend.musicRadio(videoId, function(res) {
             app.radioLoading = false
             // Bail if the user has since started a different / longer queue (album, another song).
-            if (app.playQueue.length !== 1 || app.playQueue[0].videoId !== videoId)
+            if (Logic.radioStale(snap, app.playQueue, app.npId))
                 return
-            var tracks = (res && res.tracks) ? res.tracks : []
-            if (app.shuffle)                       // shuffle on → don't fill in fixed radio order
-                tracks = app.shuffledCopy(tracks)
-            var q = app.playQueue.slice()
-            var have = { }
-            have[videoId] = true                   // the seed is already the current track
-            for (var j = 0; j < tracks.length; j++) {
-                var t = tracks[j]
-                if (t.videoId && !have[t.videoId]
-                        && !(backend.skipDisliked && app.isDisliked(t.videoId))) {
-                    have[t.videoId] = true
-                    q.push(t)
-                }
-            }
+            var q = app.withRadio(res)
             if (q.length > app.playQueue.length) {
                 app.playQueue = q
                 app.prefetchNext()                 // warm up the next track for a gapless hand-off
@@ -207,7 +196,7 @@ ApplicationWindow {
             return
         app.npFailStreak = 0
         app.playQueue = items
-        app.playQueueIndex = Math.max(0, Math.min(startIndex || 0, items.length - 1))
+        app.playQueueIndex = Logic.clampIndex(startIndex, items.length)
         if (app.shuffle) {                     // shuffle on → randomize the unplayed tail now
             app.unshuffledQueue = items.slice() // and remember this list's order for un-shuffle
             app.shuffleTail()
@@ -252,30 +241,32 @@ ApplicationWindow {
         app.prefetchNext()                     // warm up the following track
     }
 
-    function isDisliked(videoId) {
-        return !!videoId && backend.dislikedIds.indexOf(videoId) !== -1
+    // The queue index Next lands on (skip-disliked hops over disliked tracks), or -1.
+    function nextQueueIndex() {
+        return Logic.nextIndex(app.playQueue, app.playQueueIndex, backend.skipDisliked,
+                               backend.dislikedIds)
+    }
+
+    // The queue plus a radio answer's tracks (shuffled when shuffle is on; duplicates and, with
+    // skip-disliked, disliked tracks dropped).
+    function withRadio(res) {
+        var tracks = (res && res.tracks) ? res.tracks : []
+        if (app.shuffle)                           // shuffle on → don't fill in fixed radio order
+            tracks = Logic.shuffled(tracks)
+        return Logic.mergeRadio(app.playQueue, tracks, backend.skipDisliked, backend.dislikedIds)
     }
 
     function playNext() {
         if (app.hasNext) {
-            var idx = app.playQueueIndex + 1
-            // Skip-disliked: hop over any disliked tracks ahead (bounded so it can't loop).
-            if (backend.skipDisliked) {
-                var guard = 0
-                while (idx < app.playQueue.length
-                       && app.isDisliked(app.playQueue[idx].videoId)
-                       && guard < app.playQueue.length) {
-                    idx += 1; guard += 1
-                }
-            }
-            if (idx < app.playQueue.length) {
+            var idx = app.nextQueueIndex()
+            if (idx >= 0) {
                 app.playQueueIndex = idx
                 app.startCurrentQueueItem(false)
                 return
             }
             // everything after the current track was disliked → fall through to wrap / radio
         }
-        if (app.repeatMode === 1 && app.playQueue.length > 0) {
+        if (Logic.afterQueueEnd(app.repeatMode, app.playQueue.length) === "wrap") {
             app.playQueueIndex = 0             // repeat-all → wrap to the top of the queue
             if (app.shuffle)
                 app.shuffleTail(-1)            // reshuffle the whole queue for the new pass
@@ -314,9 +305,7 @@ ApplicationWindow {
         if (!track || !track.videoId)
             return
         if (!app.npActive) { app.playSong(track); return }
-        var q = app.playQueue.slice()
-        q.splice(app.playQueueIndex + 1, 0, track)
-        app.playQueue = q
+        app.playQueue = Logic.insertNext(app.playQueue, app.playQueueIndex, track)
         app.prefetchNext()
     }
 
@@ -332,13 +321,11 @@ ApplicationWindow {
 
     // Remove a queued track (not the one currently playing) and keep the index pointing right.
     function queueRemove(index) {
-        if (index < 0 || index >= app.playQueue.length || index === app.playQueueIndex)
+        var r = Logic.removeAt(app.playQueue, index, app.playQueueIndex)
+        if (!r)
             return
-        var q = app.playQueue.slice()
-        q.splice(index, 1)
-        if (index < app.playQueueIndex)
-            app.playQueueIndex -= 1
-        app.playQueue = q
+        app.playQueueIndex = r.index
+        app.playQueue = r.queue
         if (app.npActive)
             app.prefetchNext()             // the next track may have changed: warm the right one
     }
@@ -348,25 +335,7 @@ ApplicationWindow {
     // leaving history + the current track pinned. Reassigns playQueue so QML sees the change.
     function shuffleTail(fromIndex) {
         var pivot = (fromIndex === undefined) ? app.playQueueIndex : fromIndex
-        var q = app.playQueue.slice()
-        // Fisher-Yates over the sub-range [pivot+1 .. end]: i walks the last item down to pivot+2,
-        // j picks uniformly from [pivot+1 .. i].
-        for (var i = q.length - 1; i > pivot + 1; i--) {
-            var j = pivot + 1 + Math.floor(Math.random() * (i - pivot))
-            var tmp = q[i]; q[i] = q[j]; q[j] = tmp
-        }
-        app.playQueue = q
-    }
-
-    // In-place Fisher-Yates of a plain array (used to shuffle a freshly-fetched radio batch before
-    // it's appended, so radio fill-in isn't played in YTM's fixed recommendation order).
-    function shuffledCopy(arr) {
-        var a = arr.slice()
-        for (var i = a.length - 1; i > 0; i--) {
-            var j = Math.floor(Math.random() * (i + 1))
-            var tmp = a[i]; a[i] = a[j]; a[j] = tmp
-        }
-        return a
+        app.playQueue = Logic.shuffleTail(app.playQueue, pivot)
     }
 
     // Toggle shuffle. ON: snapshot the current order, then randomize the tail. OFF: restore the
@@ -381,24 +350,7 @@ ApplicationWindow {
             app.unshuffledQueue = app.playQueue.slice()
             app.shuffleTail()
         } else {
-            var snap = app.unshuffledQueue || []
-            var head = app.playQueue.slice(0, app.playQueueIndex + 1)   // history + current, as played
-            var headIds = {}
-            for (var h = 0; h < head.length; h++) headIds[head[h].videoId] = true
-            var tailIds = {}
-            for (var t = app.playQueueIndex + 1; t < app.playQueue.length; t++)
-                tailIds[app.playQueue[t].videoId] = true
-            var restored = []
-            var placed = {}
-            for (var s = 0; s < snap.length; s++) {           // snapshot order, tail-only, not replayed
-                var v = snap[s].videoId
-                if (tailIds[v] && !headIds[v] && !placed[v]) { restored.push(snap[s]); placed[v] = true }
-            }
-            for (var k = app.playQueueIndex + 1; k < app.playQueue.length; k++) {  // extras (radio) after
-                var e = app.playQueue[k]
-                if (!placed[e.videoId]) { restored.push(e); placed[e.videoId] = true }
-            }
-            app.playQueue = head.concat(restored)
+            app.playQueue = Logic.unshuffle(app.playQueue, app.playQueueIndex, app.unshuffledQueue)
             app.unshuffledQueue = []
         }
         app.prefetchNext()   // the next track just changed
@@ -409,25 +361,11 @@ ApplicationWindow {
     // Loaded per track in startCurrentQueueItem into app.npSponsorSegments, then acted on by the
     // sponsorSkipTimer poll near the player Connections.
 
-    // Configured action for a category: "skip" (auto-skip), "manual" (show a skip button), or
-    // "off". Categories the user never configured default to off, so only opted-in ones ever fire.
-    function sbAction(category) {
-        if (!backend.sponsorBlock)
-            return "off"
-        var a = backend.sbActions || {}
-        return a[category] ? a[category] : "off"
-    }
 
     // SponsorBlock segments cached on a downloaded copy (stashed at download time), for offline
     // skip. Empty if this track isn't downloaded or had no segments when it was.
     function localSponsorSegments(videoId) {
-        if (!videoId)
-            return []
-        var dl = backend.downloads
-        for (var i = 0; i < dl.length; i++)
-            if (dl[i].id === videoId && dl[i].sb_segments)
-                return dl[i].sb_segments
-        return []
+        return Logic.localSponsorSegments(backend.downloads, videoId)
     }
 
     // Load a track's segments into app.npSponsorSegments. Downloaded copy with cached segments →
@@ -452,31 +390,17 @@ ApplicationWindow {
     }
 
     // Poll hook (sponsorSkipTimer): if the playhead sits inside a segment, auto-skip it or expose
-    // a manual skip button. Skips only when a real chunk is left (margin) so landing on seg.end
-    // can't re-trigger a seek loop. app.npManualSeg drives the Now Playing button — set only while
-    // inside a manual-action segment, cleared otherwise.
+    // a manual skip button (Logic.sponsorDecision). app.npManualSeg drives the Now Playing button —
+    // set only while inside a manual-action segment, cleared otherwise.
     function checkSponsorSkip() {
         var segs = app.npSponsorSegments
         if (!backend.sponsorBlock || !segs || segs.length === 0)
             return
-        var pos = player.position / 1000.0            // ms → s (segments are in seconds)
-        var manual = null
-        for (var i = 0; i < segs.length; i++) {
-            var s = segs[i]
-            if (pos < s.start || pos >= s.end)
-                continue
-            var act = app.sbAction(s.category)
-            if (act === "skip") {
-                if (pos < s.end - 0.4) {              // ignore the last sliver → no seek loop
-                    app.npManualSeg = null
-                    player.seek(Math.round(s.end * 1000))
-                }
-                return
-            } else if (act === "manual") {
-                manual = s                            // button skips to its end on tap
-            }
-        }
-        app.npManualSeg = manual                      // null when outside every manual segment
+        var d = Logic.sponsorDecision(segs, player.position / 1000.0, backend.sponsorBlock,
+                                      backend.sbActions)
+        app.npManualSeg = d.manual
+        if (d.skip)
+            player.seek(Math.round(d.skip.end * 1000))
     }
 
     // Tapped the manual "Skip" button in Now Playing → jump past the flagged segment.
@@ -493,33 +417,20 @@ ApplicationWindow {
     // turn that into a playback gain (10^(-dB/20)) so tracks play at a consistent level; the C++
     // player applies it via a dedicated volume element. Unity (1.0) = no change.
     function gainForLoudness(db) {
-        var g = Math.pow(10, -db / 20.0)
-        var ceil = Math.pow(10, backend.normMaxBoostDb / 20.0)   // user "max boost" knob (0 dB = 1.0)
-        if (g > ceil) g = ceil                        // cap upward gain on quiet tracks
-        if (g < 0.1)  g = 0.1                          // attenuation floor (-20 dB); mirrors C++
-        return g
+        return Logic.gainForLoudness(db, backend.normMaxBoostDb)   // capped by the "max boost" knob
     }
 
     // Recompute the current track's normalization gain from its stored loudnessDb + current
     // settings, WITHOUT re-fetching — used when the Normalize toggle or the max-boost knob changes.
     function reapplyNormGain() {
-        if (!backend.normalizeVolume || typeof app.npLoudnessDb !== "number") {
-            player.setNormGain(1.0)
-            return
-        }
-        player.setNormGain(app.gainForLoudness(app.npLoudnessDb))
+        player.setNormGain(Logic.normGain(backend.normalizeVolume, app.npLoudnessDb,
+                                          backend.normMaxBoostDb))
     }
 
     // loudnessDb cached on a downloaded copy (see download()), for offline normalization. Returns
     // a number, or undefined when this track isn't downloaded / had no loudness data.
     function localLoudnessDb(videoId) {
-        if (!videoId)
-            return undefined
-        var dl = backend.downloads
-        for (var i = 0; i < dl.length; i++)
-            if (dl[i].id === videoId && typeof dl[i].loudness_db === "number")
-                return dl[i].loudness_db
-        return undefined
+        return Logic.localLoudnessDb(backend.downloads, videoId)
     }
 
     // Set the player's per-track normalization gain: reset to unity first (so a track with no data
@@ -532,21 +443,17 @@ ApplicationWindow {
         app.npLoudnessDb = null                        // forget the previous track's level
         player.setNormGain(1.0)                        // reset per track
         app.npNormPending = ""
-        if (!backend.normalizeVolume || !videoId)
+        var src = Logic.normSource(backend.normalizeVolume, videoId,
+                                   app.localLoudnessDb(videoId), info)
+        if (src.source === "off")
             return
-        var localDb = app.localLoudnessDb(videoId)
-        if (localDb !== undefined) {
-            app.npLoudnessDb = localDb
+        if (src.source === "local" || src.source === "resolve") {
+            app.npLoudnessDb = src.db
             app.reapplyNormGain()
             return
         }
-        if (info === null) {                           // resolve in flight → decide when it lands
+        if (src.source === "pending") {                // resolve in flight → decide when it lands
             app.npNormPending = videoId
-            return
-        }
-        if (info && typeof info.loudness_db === "number") {
-            app.npLoudnessDb = info.loudness_db
-            app.reapplyNormGain()
             return
         }
         backend.trackLoudness(videoId, function(db) {
@@ -575,40 +482,22 @@ ApplicationWindow {
     function rateCurrent(rating) {
         if (!app.npId)
             return
-        if (app.npRating === rating) {
-            app.npRating = ""
-            backend.musicRate(app.npId, "INDIFFERENT")
-            app.showToast(rating === "LIKE" ? qsTr("Like removed") : qsTr("Dislike removed"))
-        } else {
-            app.npRating = rating
-            backend.musicRate(app.npId, rating)
-            app.showToast(rating === "LIKE" ? qsTr("Liked") : qsTr("Disliked"))
-        }
+        var r = Logic.rateToggle(app.npRating, rating)
+        app.npRating = r.rating
+        backend.musicRate(app.npId, r.send)
+        app.showToast(r.toast === "liked" ? qsTr("Liked")
+                      : r.toast === "disliked" ? qsTr("Disliked")
+                      : r.toast === "like-removed" ? qsTr("Like removed") : qsTr("Dislike removed"))
     }
 
     // --- Downloads (offline audio) ---
 
     // Turn a filesystem path into a valid file:// URI (percent-encode each segment so spaces and
     // brackets in the download filename don't break GStreamer's uridecodebin).
-    function fileUri(path) {
-        if (!path)
-            return ""
-        var parts = path.split("/")
-        for (var i = 0; i < parts.length; i++)
-            parts[i] = encodeURIComponent(parts[i])
-        return "file://" + parts.join("/")
-    }
+    function fileUri(path) { return Logic.fileUri(path) }
 
     // Local file for a videoId if it's been downloaded (audio), else "".
-    function localPathFor(videoId) {
-        if (!videoId)
-            return ""
-        var dl = backend.downloads
-        for (var i = 0; i < dl.length; i++)
-            if (dl[i].id === videoId && dl[i].kind === "audio" && dl[i].path)
-                return dl[i].path
-        return ""
-    }
+    function localPathFor(videoId) { return Logic.localPath(backend.downloads, videoId) }
     function isDownloaded(videoId) { return app.localPathFor(videoId).length > 0 }
 
     // Start an offline audio download of a track (no-op if already downloaded).
@@ -616,10 +505,7 @@ ApplicationWindow {
         if (!track || !track.videoId || app.isDownloaded(track.videoId))
             return
         backend.downloadTrack(track)
-        var a = {}
-        for (var k in app.dlActive) a[k] = app.dlActive[k]
-        a[track.videoId] = { title: track.title || qsTr("track"), subtitle: track.subtitle || "", pct: 0 }
-        app.dlActive = a
+        app.dlActive = Logic.dlStarted(app.dlActive, track, qsTr("track"))
         app.showToast(qsTr("Downloading %1…").arg(track.title || qsTr("track")))
     }
 
@@ -632,20 +518,12 @@ ApplicationWindow {
         backend.downloadPlaylist(tracks, function(res) {
             var ids = (res && res.queued) ? res.queued : []
             var skipped = (res && res.skipped) ? res.skipped : 0
-            var byId = {}
-            for (var i = 0; i < tracks.length; i++)
-                if (tracks[i].videoId) byId[tracks[i].videoId] = tracks[i]
-            var a = {}
-            for (var k in app.dlActive) a[k] = app.dlActive[k]
-            for (var j = 0; j < ids.length; j++) {
-                var t = byId[ids[j]]
-                if (t) a[ids[j]] = { title: t.title || qsTr("track"), subtitle: t.subtitle || "", pct: 0 }
-            }
-            app.dlActive = a
-            if (ids.length > 0)
-                app.showToast(skipped > 0
-                              ? qsTr("Queued %n song(s) (%1 already saved)…", "", ids.length).arg(skipped)
-                              : qsTr("Queued %n song(s)…", "", ids.length))
+            app.dlActive = Logic.dlQueued(app.dlActive, tracks, ids, qsTr("track"))
+            var toast = Logic.dlQueuedToast(ids.length, skipped)
+            if (toast === "queued-skipped")
+                app.showToast(qsTr("Queued %n song(s) (%1 already saved)…", "", ids.length).arg(skipped))
+            else if (toast === "queued")
+                app.showToast(qsTr("Queued %n song(s)…", "", ids.length))
             else
                 app.showToast(qsTr("All songs already downloaded"))
         })
@@ -678,19 +556,12 @@ ApplicationWindow {
         onDownloadProgress: {                  // (videoId, kind, percent)
             if (kind !== "audio")
                 return
-            var a = {}
-            for (var k in app.dlActive) a[k] = app.dlActive[k]
-            var t = (a[videoId] && a[videoId].title) ? a[videoId].title : qsTr("Downloading")
-            var sub = (a[videoId] && a[videoId].subtitle) ? a[videoId].subtitle : ""
-            a[videoId] = { title: t, subtitle: sub, pct: percent }
-            app.dlActive = a
+            app.dlActive = Logic.dlProgress(app.dlActive, videoId, percent, qsTr("Downloading"))
         }
         onDownloadFinished: {                   // (videoId, kind, ok, message)
-            var was = app.dlActive[videoId]     // its title/artist, before we drop it from the map
-            var a = {}
-            for (var k in app.dlActive)
-                if (k !== videoId) a[k] = app.dlActive[k]
-            app.dlActive = a
+            var fin = Logic.dlFinished(app.dlActive, videoId)
+            var was = fin.was                   // its title/artist, before we drop it from the map
+            app.dlActive = fin.active
             if (kind === "audio") {
                 app.showToast(ok ? qsTr("Downloaded") : qsTr("Download failed: %1").arg(message))
                 if (ok)                          // stash its lyrics alongside the audio, for offline
@@ -702,13 +573,7 @@ ApplicationWindow {
 
     // Upscale a YouTube Music / Google art URL to a larger square. List thumbnails arrive small
     // (and get disk-cached); the Now Playing page asks for a big, crisp version instead.
-    function artUrl(url, size) {
-        if (!url)
-            return ""
-        var s = size || 600
-        return url.replace(/=w\d+-h\d+/, "=w" + s + "-h" + s)
-                  .replace(/\/(default|mqdefault|sddefault)\.jpg/, "/hqdefault.jpg")
-    }
+    function artUrl(url, size) { return Logic.artUrl(url, size) }
 
     // Open the artist (channel) page for a browseId.
     function openArtist(browseId, name) {
@@ -721,15 +586,12 @@ ApplicationWindow {
     // Route a tapped card/result to the right place: a song plays, an artist opens the artist
     // page, anything else (album / playlist / mix) opens its tracklist.
     function openBrowse(item) {
-        if (!item)
-            return
-        if (item.videoId)
+        var target = Logic.browseTarget(item)
+        if (target === "song")
             app.playSong(item)
-        else if (item.kind === "artist" && item.browseId)
+        else if (target === "artist")
             app.openArtist(item.browseId, item.title)
-        else if (item.browseId && item.browseId.indexOf("UC") === 0)
-            app.openArtist(item.browseId, item.title)   // user profile / channel, not a tracklist
-        else if (item.browseId)
+        else if (target === "playlist")
             pageStack.push(Qt.resolvedUrl("pages/PlaylistPage.qml"),
                 { browseId: item.browseId, playlistTitle: item.title || "",
                   thumb: item.thumb || "" })
@@ -774,14 +636,10 @@ ApplicationWindow {
             return
         // The track playNext() will actually land on: it hops over disliked ones when
         // "skip disliked" is on, so warming the literal next entry would waste a resolve.
-        var idx = app.playQueueIndex + 1
-        if (backend.skipDisliked)
-            while (idx < app.playQueue.length && app.isDisliked(app.playQueue[idx].videoId))
-                idx += 1
-        var nx = app.playQueue[idx]
         // A downloaded track plays from its local file and never resolves — nothing to warm.
-        if (nx && nx.videoId && !app.isDownloaded(nx.videoId))
-            backend.prefetchResolve(nx.videoId)
+        var id = Logic.prefetchId(app.playQueue, app.nextQueueIndex(), backend.downloads)
+        if (id)
+            backend.prefetchResolve(id)
     }
 
     // When the NEXT track is the last one in the queue, fetch its song radio now and append it
@@ -790,13 +648,11 @@ ApplicationWindow {
     // queue wraps / replays, radio is never reached); remembered per seed so a radio that returns
     // nothing new isn't re-asked on every prefetch.
     function prefetchRadioTail() {
-        var n = app.playQueue.length
-        if (app.radioLoading || !backend.autoplay || app.repeatMode !== 0
-                || app.playQueueIndex < 0 || app.playQueueIndex + 2 !== n)
+        var seed = Logic.radioTailSeed(app.playQueue, app.playQueueIndex, app.radioLoading,
+                                       backend.autoplay, app.repeatMode, app.radioTailSeed)
+        if (!seed)
             return
-        var seed = app.playQueue[n - 1].videoId
-        if (!seed || seed === app.radioTailSeed)
-            return
+        var snap = Logic.radioSnapshot(app.playQueue, "")
         app.radioTailSeed = seed
         app.radioTailAdvance = false
         app.radioLoading = true
@@ -805,21 +661,9 @@ ApplicationWindow {
             var advance = app.radioTailAdvance
             app.radioTailAdvance = false
             // The queue changed under the request (new queue, reorder, another append) → drop it.
-            if (app.playQueue.length !== n || app.playQueue[n - 1].videoId !== seed)
+            if (Logic.radioStale(snap, app.playQueue, app.npId))
                 return
-            var tracks = (res && res.tracks) ? res.tracks : []
-            if (app.shuffle)
-                tracks = app.shuffledCopy(tracks)
-            var have = {}
-            for (var i = 0; i < app.playQueue.length; i++)
-                have[app.playQueue[i].videoId] = true
-            var q = app.playQueue.slice()
-            for (var j = 0; j < tracks.length; j++)
-                if (tracks[j].videoId && !have[tracks[j].videoId]
-                        && !(backend.skipDisliked && app.isDisliked(tracks[j].videoId))) {
-                    have[tracks[j].videoId] = true
-                    q.push(tracks[j])
-                }
+            var q = app.withRadio(res)
             if (q.length > app.playQueue.length) {
                 app.playQueue = q
                 if (advance) {                     // the last track already ended: carry on now
@@ -833,33 +677,23 @@ ApplicationWindow {
     // Queue ran dry → continue with the current track's song radio (YouTube Music autoplay).
     function startRadioContinuation() {
         // The tail prefetch for this very track is still out: let its answer advance the queue.
-        if (app.radioLoading && app.npId && app.npId === app.radioTailSeed) {
+        var act = Logic.continuationAction(app.radioLoading, app.npId, app.radioTailSeed,
+                                           backend.autoplay)
+        if (act === "wait") {
             app.radioTailAdvance = true
             return
         }
-        if (app.radioLoading || !app.npId || !backend.autoplay)
+        if (act !== "fetch")
             return
         var seed = app.npId
-        var n = app.playQueue.length
-        var lastId = n > 0 ? app.playQueue[n - 1].videoId : ""
+        var snap = Logic.radioSnapshot(app.playQueue, seed)
         app.radioLoading = true
         backend.musicRadio(seed, function(res) {
             app.radioLoading = false
             // The queue / current track changed under the request (new album, skip) → drop it.
-            if (app.npId !== seed || app.playQueue.length !== n
-                    || (n > 0 && app.playQueue[n - 1].videoId !== lastId))
+            if (Logic.radioStale(snap, app.playQueue, app.npId))
                 return
-            var tracks = (res && res.tracks) ? res.tracks : []
-            if (app.shuffle)                       // shuffle on → don't fill in fixed radio order
-                tracks = app.shuffledCopy(tracks)
-            var have = {}
-            for (var i = 0; i < app.playQueue.length; i++)
-                have[app.playQueue[i].videoId] = true
-            var q = app.playQueue.slice()
-            for (var j = 0; j < tracks.length; j++)
-                if (tracks[j].videoId && !have[tracks[j].videoId]
-                        && !(backend.skipDisliked && app.isDisliked(tracks[j].videoId)))
-                    q.push(tracks[j])
+            var q = app.withRadio(res)
             if (q.length > app.playQueue.length) {
                 app.playQueue = q
                 app.playQueueIndex += 1
@@ -873,7 +707,7 @@ ApplicationWindow {
     // the next, but bound the streak so an all-failing queue doesn't spin forever.
     function skipFailedTrack() {
         app.npFailStreak += 1
-        if (app.npFailStreak <= 4)
+        if (Logic.failAction(app.npFailStreak) === "next")
             app.playNext()
         else
             app.npError = qsTr("Couldn't play the next few tracks — stopped.")
@@ -887,22 +721,21 @@ ApplicationWindow {
         var info = app.npInfo
         if (!info)
             return
-        var urls = (info.audio_urls && info.audio_urls.length > 0)
-                   ? info.audio_urls
-                   : ((info.audio_url && info.audio_url.length > 0) ? [info.audio_url] : [])
+        var step = Logic.ladderStep(info, app.npAudioIdx, app.npTriedMuxed, app.npReresolved,
+                                    app.npId.length > 0)
         player.stop()
         player.userAgent = info.http_ua
         player.audioUrl = ""
-        if (app.npAudioIdx < urls.length) {
+        if (step.action === "audio") {
             player.audioOnly = true
-            player.videoUrl = urls[app.npAudioIdx]
+            player.videoUrl = step.url
             player.play()
-        } else if (!app.npTriedMuxed && info.muxed_url && info.muxed_url.length > 0) {
+        } else if (step.action === "muxed") {
             app.npTriedMuxed = true
             player.audioOnly = false
-            player.videoUrl = info.muxed_url
+            player.videoUrl = step.url
             player.play()
-        } else if (!app.npReresolved && app.npId.length > 0) {
+        } else if (step.action === "reresolve") {
             // Ladder + muxed exhausted. Before giving up, get ONE fresh resolve of THIS track —
             // its URLs may have gone fully stale (resumed after a long pause, or the proxy's
             // per-URL 403 refresh couldn't keep up). Fresh URLs, restart the ladder from the top.
@@ -929,7 +762,7 @@ ApplicationWindow {
         // Track finished → repeat-one replays it; otherwise advance the queue (album/playlist),
         // wrap on repeat-all, or start radio when it runs dry.
         onEnded: {
-            if (app.repeatMode === 2)
+            if (Logic.endAction(app.repeatMode) === "replay")
                 app.replayCurrent()
             else
                 app.playNext()

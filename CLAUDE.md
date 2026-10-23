@@ -56,21 +56,50 @@ copied verbatim from FinTube (`youfish.py:306-308`), not FinTune-specific.
 sh build.sh          # shadow build via sfdk → ../harbour-fintune.build/RPMS/
                      # override target: TARGET=SailfishOS-5.1.0.11-aarch64 sh build.sh
 sh clean.sh          # remove build scatter from the source tree
+sh test.sh           # every offline test: engine, parsers, coverage check, QML logic
 python3 python/test_youfish.py   # offline engine tests — pure stdlib, externals mocked
+python3 tests/test_parsers.py    # innertube parsers vs recorded YouTube answers (--live/--record)
+python3 tests/test_ytm_parsers.py # ytm parsers + LRCLIB, same flags
+python3 tests/coverage_report.py # engine functions no test runs (--check in CI)
+python3 tests/live_ytdlp.py      # real yt-dlp + live YouTube, yt-dlp paths only (--pot)
+node tests/qml_logic_test.js     # qml/logic.js — the app's pure decisions
 ```
+
+- **Parser tests run on recorded answers.** `tests/fixtures/*.json.gz` are real YouTube answers
+  (public IP scrubbed to 203.0.113.1); the checks assert what the app needs, not exact values.
+  When a parser drifts, `--live` shows which; fix it, then `--record`. A parser change gets a
+  `--live` run before it ships.
+- **Coverage ratchet.** `tests/coverage_report.py --check` fails on any engine function no test
+  runs, unless `tests/coverage_baseline.txt` lists it with the reason it can't run offline.
+  New code needs a test; the baseline only shrinks (`--update` after adding tests).
+- **`TESTING.md`** is the release procedure (beta tag `1.x.y-betaN` → pre-release → device
+  checklist → final tag) and the per-feature device checklist. A new or changed feature gets a
+  checklist line there and, where it has logic, a test.
+- **Queue, radio and player decisions live in `qml/logic.js`** (`.pragma library`, ES5 only, no
+  QML types, no qsTr): next index with the disliked hop (shared by Next and the prefetch, so the
+  warmed track is the one that plays), the radio merge (shared by seed, tail prefetch and
+  continuation), shuffle/unshuffle, queue edits, the audio ladder, normalization gain and its
+  source (download → resolve → fetch), SponsorBlock, routing, repeat/end-of-track, the radio
+  request race guards (`radioSnapshot`/`radioStale`, `radioTailSeed`, `continuationAction`),
+  download lookups and the `dlActive` map, the rating toggle, Backend's search/session answer
+  shaping, home shelf replacement, the EQ preset table and the SponsorBlock menu mapping. QML
+  applies the result. The node harness rejects ES6
+  syntax Qt 5.6 can't parse. Put new decision logic there, with a test.
 
 - `build.sh` defaults to `SailfishOS-5.0.0.62-aarch64.default` (`build.sh:14`), same 5.0
   floor as FinTube, but FinTune's copy **actively enforces** it: after the sfdk build it
   stamps a marker, finds fresh RPMs, and hard-fails if `rpm -qpR` shows any `GLIBC_2.34+`
   require (`build.sh:19-48`) — a 5.1-built RPM silently locks out 5.0 devices otherwise.
   FinTube's `build.sh` has no such guard.
-- The **engine test suite** (`python/test_youfish.py`, ~2.3k lines, 133 tests) runs in ~0.6s,
-  fully offline (`python3 python/test_youfish.py` → `Ran 133 tests ... OK`). The suite stubs
+- The **engine test suite** (`python/test_youfish.py`, ~3k lines, 187 tests) runs in ~0.7s,
+  fully offline (`python3 python/test_youfish.py` → `Ran 187 tests ... OK`). The suite stubs
   `youfish._it = lambda: None` right after the import so no test can touch the network; the
   `Innertube*` classes (parsing copied from FinTube, `InnertubeEngineWiring`) switch the fast
   path back on against canned responses. `ytm` now has tests for playlist continuation and the
-  atomic stores (`YtmPlaylistContinuation`, `YtmAtomicStores`). Runs in CI on every push/PR
-  (`.github/workflows/tests.yml`, byte-identical to FinTube's). **Run it after any change
+  atomic stores (`YtmPlaylistContinuation`, `YtmAtomicStores`), and the local stores and
+  lyrics parsing (`YtmLocalStores`, `LyricsParsing`). Runs in CI on every push/PR, together with
+  the QML logic suite (`.github/workflows/tests.yml`, byte-identical to FinTube's). **Run it after
+  any change
   to `youfish.py` or `ytm.py`.**
 - It is FinTube's own suite cut to the audio-only contract — several provider-machinery
   classes (`ChannelAwareDownloads`, `ExtractorArgParse`, `PotStatusDenoManaged`,
@@ -79,17 +108,24 @@ python3 python/test_youfish.py   # offline engine tests — pure stdlib, externa
   parts of the engine are kept in lockstep.
 - **`ytm.py` is only tested at its login/identity/account-switching edges** (`YtmIdentity`,
   `YtmAccountSelector`, `test_youfish.py:1261-1434`). Verified by grep: `search`,
-  `get_home`, `get_radio`, `get_lyrics`, `get_artist`, `get_playlist` (except its continuation following),
-  `get_library_playlists`, `add_to_playlist`, `play_history`, `disliked_ids`, `rate_song`,
-  `login_begin`, `verify_session`, `account_status`, `import_browser_login` — the entire
+  `get_home`, `get_radio`, `get_lyrics` (its LRC parser and best-match pick are tested),
+  `get_artist`, `get_playlist` (except its continuation following),
+  `get_library_playlists`, `add_to_playlist`, `login_begin`, `verify_session`, `account_status`,
+  `import_browser_login` — the entire
   content-fetching surface that is the actual product — have **zero** references anywhere
   in the test file. Verify parsing/search/home/radio/lyrics changes on-device
   (`YOUFISH_DEBUG=1`); CI cannot catch a regression there.
-- The **release build** (`.github/workflows/build.yml`) only fires on tags matching `1.*`
-  and cross-builds aarch64 via `coderus/github-sfos-build@sfos5` pinned to release
-  `5.0.0.43`, publishing the RPM as a GitHub release — byte-identical to FinTube's workflow.
-- The C++ player and the real yt-dlp/Deno/PO-token processes are **not** covered by any
-  automated test — verify those on-device.
+- The **release build** (`.github/workflows/build.yml`) only fires on tags matching `1.*`,
+  runs both test suites first, and cross-builds aarch64 + armv7hl via
+  `coderus/github-sfos-build@sfos5` pinned to release `5.0.0.43`, publishing a GitHub release —
+  byte-identical to FinTube's workflow. A tag with a dash (`1.4.0-beta1`) is published as a
+  pre-release.
+- **`tests/live_ytdlp.py`** is the only test that runs the real yt-dlp (binary and in-process,
+  InnerTube off, `--pot` adds Deno + the PO-token provider). Bot walls and rate limits are
+  skips, not failures. Weekly + on demand in `.github/workflows/live.yml` (arm64 runner, so
+  the phone's builds); not in `test.sh` or the release gate. Run it from home before a release.
+- The C++ player is **not** covered by any automated test, and the real yt-dlp/Deno/PO-token
+  processes only by that live check — verify those on-device.
 
 ## The invariants (do not break these)
 
@@ -123,7 +159,8 @@ python3 python/test_youfish.py   # offline engine tests — pure stdlib, externa
    **InnerTube fast path (in front of both yt-dlp forms).** `resolve()` first asks
    `_fast_player_data` (`youfish.py:1430`): one VISIONOS `player` POST via the shared
    `innertube.py` plus a probe of the *audio* URL it will play (playback's own first Range
-   request, read for 2 bytes) (~0.1-0.4 s vs 1.2-3.9 s for a yt-dlp dump). Not live, has an audio pick, and no
+   request, read for 2 bytes) (~0.1-0.4 s vs 1.2-3.9 s for a yt-dlp dump). Not live, has an audio
+  pick, and no
    user-chosen `player_client` (an explicit client is a troubleshooting choice only yt-dlp can
    honour). On a hit, yt-dlp, the PO-token sidecar and the 403 probe/widen branches are all
    skipped and `_client_used` is `innertube:<client>`. Anything else falls through to the
@@ -360,13 +397,19 @@ against the same shared C++ EQ API.
   match `_FINAL_ERR` (removed, terminated, not yet live, geo-blocked, private while signed out) skip
   the binary re-run and the widen retry: no client changes YouTube's answer.
 
+- **A fresh PO-token URL is refused for its first ~3 s.** googlevideo answers 403 to a `pot=`
+  URL until ~2.6–3.1 s after extraction, then serves it (measured 2026-10-22, bgutil 1.3.2 and
+  2.0.2). `_DirectFetch._warming_up` retries such a URL's first request for `_POT_WARMUP` (6 s)
+  instead of dying into a re-resolve, whose new URL would be just as young. Token-free, older
+  or already-streaming URLs never wait. `tests/live_ytdlp.py --pot` is the check.
 - **A just-ended livestream (`live_status == "post_live"`) is refused** with a "still processing"
   message. Until YouTube finishes the recording, its formats are DASH segment lists that the proxy
   can't serve as one file.
 
 - **`ytm.py` is barely tested.** Only `get_playlist` continuation, the atomic stores and a few
   parsers (search's top-result card, podcast episodes, instrumental lyrics, logout) have tests
-  (`YtmPlaylistContinuation`, `YtmAtomicStores`, `YtmSweepFixes`); `test_youfish.py` otherwise only fakes its
+  (`YtmPlaylistContinuation`, `YtmAtomicStores`, `YtmSweepFixes`); `test_youfish.py` otherwise only
+  fakes its
   `netscape_cookies()` surface (`test_youfish.py:361-379`) to exercise cookie handoff; no
   `test_ytm.py` exists anywhere in the tree. Every search/home/artist/radio/lyrics parsing
   change ships with no regression coverage — verify by hand.

@@ -1,5 +1,6 @@
 import QtQuick 2.0
 import Sailfish.Silica 1.0
+import "../logic.js" as Logic
 
 // 10-band equalizer. Bands map to equalizer-10bands' fixed centre frequencies. Adjusting a band
 // previews live on the audio engine; the value is persisted (and re-applied across tracks) on
@@ -12,18 +13,9 @@ Page {
 
     readonly property var freqLabels: [qsTr("%1 Hz").arg(29), qsTr("%1 Hz").arg(59), qsTr("%1 Hz").arg(119), qsTr("%1 Hz").arg(237), qsTr("%1 Hz").arg(474),
                                        qsTr("%1 Hz").arg(947), qsTr("%1 kHz").arg("1.9"), qsTr("%1 kHz").arg("3.8"), qsTr("%1 kHz").arg("7.5"), qsTr("%1 kHz").arg(15)]
-    // Preset curves (dB per band). "Flat" (all zero) is index 0.
+    // Preset names, in the order of Logic.EQ_PRESETS (the curves). "Flat" is index 0.
     readonly property var presetNames: [qsTr("Flat"), qsTr("Bass boost"), qsTr("Treble boost"), qsTr("Rock"),
                                         qsTr("Pop"), qsTr("Vocal"), qsTr("Electronic")]
-    readonly property var presets: [
-        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [6, 5, 4, 2, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 2, 4, 5, 6],
-        [5, 3, -1, -2, -1, 1, 3, 4, 4, 4],
-        [-1, 2, 4, 4, 2, 0, -1, -1, 0, 1],
-        [-2, -1, 0, 2, 4, 4, 3, 2, 0, -1],
-        [4, 3, 0, -2, -3, 0, 2, 3, 4, 5]
-    ]
 
     function commitBand(i, v) {
         var b = app.backend.eqBands.slice()
@@ -31,9 +23,10 @@ Page {
         app.backend.setEqBands(b)
     }
     function applyPreset(idx) {
-        if (idx < 0 || idx >= presets.length) return
-        app.backend.setEqBands(presets[idx].slice())
-        if (idx !== 0 && !app.backend.eqEnabled)
+        var plan = Logic.presetPlan(idx, app.backend.eqEnabled)
+        if (!plan) return
+        app.backend.setEqBands(plan.bands)
+        if (plan.enable)
             app.backend.setEqEnabled(true)          // picking a curve implies you want it on
     }
 

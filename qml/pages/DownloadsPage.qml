@@ -1,5 +1,6 @@
 import QtQuick 2.0
 import Sailfish.Silica 1.0
+import "../logic.js" as Logic
 
 // Offline downloads — tracks saved for local, network-free playback. Tap to play; long-press to
 // remove. In-progress downloads show at the top with a live percentage.
@@ -11,18 +12,10 @@ Page {
     property var activeList: []     // in-flight downloads [{id,title,pct}]
 
     function refresh() {
-        var out = []
-        var dl = app.backend.downloads
-        for (var i = 0; i < dl.length; i++)
-            if (dl[i].kind === "audio")
-                out.push(dl[i])
-        page.items = out
+        page.items = Logic.audioDownloads(app.backend.downloads)
     }
     function refreshActive() {
-        var out = []
-        for (var k in app.dlActive)
-            out.push({ id: k, title: app.dlActive[k].title, pct: app.dlActive[k].pct })
-        page.activeList = out
+        page.activeList = Logic.dlActiveList(app.dlActive)
     }
 
     Component.onCompleted: { app.backend.loadDownloads(); refresh(); refreshActive() }

@@ -1,5 +1,6 @@
 import QtQuick 2.0
 import Sailfish.Silica 1.0
+import "../logic.js" as Logic
 
 // Lyrics for the current track (LRCLIB). Synced lyrics scroll and highlight in time with playback
 // (tap a line to seek there); plain lyrics show as scrollable text. Re-fetches when the track
@@ -47,12 +48,7 @@ Page {
     function updateCurrent() {
         if (page.synced.length === 0)
             return
-        var pos = app.player.position
-        var idx = -1
-        for (var i = 0; i < page.synced.length; i++) {
-            if (page.synced[i].t <= pos) idx = i
-            else break
-        }
+        var idx = Logic.lyricLineAt(page.synced, app.player.position)
         if (idx !== page.currentIndex) {
             page.currentIndex = idx
             if (idx >= 0)
